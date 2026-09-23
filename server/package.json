@@ -1,0 +1,20 @@
+{
+  "name": "ai-sana-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.2.0"
+  },
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js",
+    "seed": "node src/seed.js",
+    "test": "node --test --test-isolation=none"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "openai": "^7.23.0",
+    "zod": "^4.6.5"
+  }
+}
