@@ -4,8 +4,8 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z, ZodError } from 'zod';
-import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, mergeCard, scoreCard, validatePublishable } from './card.js';
-import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
+import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, getField, setField, mergeCard, scoreCard, validatePublishable } from './card.js';
+import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, questionHistoryFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
 import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, templateResult } from './ai.js';
 
 export const app = express();
@@ -128,24 +128,42 @@ app.get('/api/tasks/:id', wrap((req, res) => {
 app.patch('/api/tasks/:id', wrap((req, res) => {
   const body = parse(z.object({
     revision: z.number().int().min(1),
+    sourceRevision: z.number().int().min(1).optional(),
     draftText: z.string().trim().min(1).max(6000).optional(),
     topic: z.enum(TOPICS).optional(),
     cardPatch: z.record(z.string(), z.unknown()).optional(),
-    answers: z.array(z.object({ questionId: z.string(), value: z.string().max(2000).nullable(), skipped: z.boolean() }).strict()).max(20).optional(),
+    answers: z.array(z.object({ questionId: z.string(), value: z.string().max(2000).nullable(), skipped: z.boolean() }).strict()).optional(),
   }).strict(), jsonFields(req));
   if (body.draftText === undefined && body.topic === undefined && body.cardPatch === undefined && body.answers === undefined) fail(422, 'VALIDATION_ERROR', 'Укажите изменения');
   const row = ownerTask(req, req.params.id);
   checkRevision(row, body.revision);
-  const card = body.cardPatch ? mergeCard(decode(row.working_card_json), body.cardPatch) : decode(row.working_card_json);
+  if (body.sourceRevision !== undefined) {
+    checkRevision(row, body.sourceRevision);
+    if (!body.cardPatch || body.draftText !== undefined || body.topic !== undefined || body.answers !== undefined) {
+      fail(422, 'VALIDATION_ERROR', 'Применяйте предложение отдельно: revision, sourceRevision и cardPatch');
+    }
+  }
+  const currentCard = decode(row.working_card_json);
+  const protectedFields = new Set(decode(row.protected_fields_json));
+  const card = body.cardPatch ? mergeCard(currentCard, body.cardPatch) : currentCard;
+  if (body.sourceRevision !== undefined) {
+    for (const path of CARD_PATHS) {
+      if (protectedFields.has(path) || getField(currentCard, path) !== null) setField(card, path, getField(currentCard, path));
+    }
+  }
+  for (const path of CARD_PATHS) {
+    if (getField(card, path) !== getField(currentCard, path)) protectedFields.add(path);
+  }
+  const knownQuestions = questionHistoryFromRow(row);
   const answers = body.answers === undefined ? decode(row.answers_json) : body.answers.map((answer) => {
     if (answer.skipped && answer.value) fail(422, 'VALIDATION_ERROR', 'Пропущенный вопрос не должен содержать ответ');
-    if (!decode(row.questions_json).some((q) => q.id === answer.questionId)) fail(422, 'VALIDATION_ERROR', 'Неизвестный вопрос');
+    if (!knownQuestions.some((q) => q.id === answer.questionId)) fail(422, 'VALIDATION_ERROR', 'Неизвестный вопрос');
     return { questionId: answer.questionId, value: answer.skipped ? null : cleanText(answer.value, 2000), skipped: answer.skipped };
   });
   if (new Set(answers.map((answer) => answer.questionId)).size !== answers.length) fail(422, 'VALIDATION_ERROR', 'Повторяющийся вопрос');
   const timestamp = now();
-  db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,revision=revision+1,updated_at=? WHERE id=?`)
-    .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), timestamp, row.id);
+  db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,protected_fields_json=?,revision=revision+1,updated_at=? WHERE id=?`)
+    .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), encode([...protectedFields]), timestamp, row.id);
   const task = taskFromRow(getTask(row.id));
   res.json({ task, previewRating: task.previewRating });
 }));
@@ -191,8 +209,9 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   const body = parse(revisionBody.extend({ mode: z.enum(['analyze', 'compose']) }), jsonFields(req));
   const row = ownerTask(req, req.params.id);
   checkRevision(row, body.revision);
-  const task = taskFromRow(row);
-  const hash = createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode: body.mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, answers: task.answers, ...(body.mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
+  const task = { ...taskFromRow(row), protectedFields: decode(row.protected_fields_json) };
+  const answerQuestions = task.questionHistory.filter((question) => task.answers.some((answer) => answer.questionId === question.id));
+  const hash = createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode: body.mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, protectedFields: task.protectedFields, answers: task.answers, answerQuestions, ...(body.mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
   const cache = decode(row.analysis_cache_json);
   if (cache[body.mode]?.hash === hash) return res.json({ ...cache[body.mode].result, sourceRevision: row.revision, mode: 'cached' });
   limitAi(actor.id);
@@ -227,9 +246,16 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   if (!result) result = templateResult(task, body.mode);
   const latest = getTask(row.id);
   if (latest.revision !== row.revision) fail(409, 'REVISION_CONFLICT', 'Задача изменилась во время AI-запроса');
-  const questions = body.mode === 'analyze' ? result.questions.map((q) => ({ ...q, id: randomUUID(), sourceRevision: row.revision })) : [];
+  const history = questionHistoryFromRow(latest);
+  const questions = body.mode === 'analyze' ? result.questions.map((q) => {
+    const existing = history.find((item) => item.field === q.field && item.text === q.text);
+    if (existing) return existing;
+    const question = { ...q, id: randomUUID(), sourceRevision: row.revision };
+    history.push(question);
+    return question;
+  }) : [];
   const payload = { questions, proposal: result.proposal, warnings: result.warnings };
-  if (body.mode === 'analyze') db.prepare('UPDATE tasks SET questions_json=? WHERE id=?').run(encode(questions), row.id);
+  if (body.mode === 'analyze') db.prepare('UPDATE tasks SET questions_json=?,question_history_json=? WHERE id=?').run(encode(questions), encode(history), row.id);
   if (mode === 'live') {
     cache[body.mode] = { hash, result: payload };
     db.prepare('UPDATE tasks SET analysis_cache_json=? WHERE id=?').run(encode(cache), row.id);

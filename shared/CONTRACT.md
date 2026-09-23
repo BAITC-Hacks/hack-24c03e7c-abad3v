@@ -1,6 +1,6 @@
 # Контракт frontend ↔ backend для MVP AI Sana
 
-Версия: 1.1. Обратно совместимое дополнение: `previewRating` доступен в `OwnerTask` и строках списка `scope=mine`; существующий `rating` сохраняет свой смысл. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
+Версия: 1.2. Обратно совместимые дополнения: `previewRating` в ответах владельцу, `questionHistory` в `OwnerTask`, безопасное применение AI через `sourceRevision` в PATCH. Существующий `rating` сохраняет свой смысл. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
 
 ## Общие правила
 
@@ -153,6 +153,7 @@ type OwnerTask = {
   workingCard: Card;
   confirmedCard: Card | null;
   questions: Question[];
+  questionHistory: Question[];
   answers: Answer[];
   revision: number;
   confirmedRevision: number | null;
@@ -167,7 +168,7 @@ type OwnerTask = {
 
 После подтверждения `confirmedCard` содержит полный Card и `confirmedRevision === revision`. При изменении опубликованной задачи `workingCard` может быть новее `confirmedCard`; в каталоге остаётся предыдущая подтверждённая версия до следующего подтверждения.
 
-`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions`, `draftText` или `previewRating`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде.
+`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions`, `questionHistory`, `draftText` или `previewRating`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде.
 
 Строка списка `TaskSummary`: `{id,title,topic,rating,publicationStatus,publishedAt,applicationCount,previewRating?}`. В каталоге title/topic/rating берутся из подтверждённой версии, `previewRating` отсутствует даже при запросе владельца. В списке бизнеса (`scope=mine`) title — рабочий `title` или первые 60 символов `draftText`, topic — рабочая тема, `rating` — подтверждённый балл (0 до первого подтверждения), `previewRating` — балл сохранённого черновика. Поэтому общий frontend-тип `TaskSummary` использует `previewRating?: Rating`, а `OwnerTask` — обязательное `previewRating: Rating`.
 
@@ -182,9 +183,13 @@ setPreviewRating(response.task.previewRating);
 const confirmed = response.task.confirmedRevision === response.task.revision && !dirty;
 ```
 
-Например: после сохранения полной карточки `previewRating.score=100`, а `rating.score=0`. Повторный GET сохраняет это различие. После подтверждения оба равны 100. Если очистить поле в опубликованной задаче, предварительный балл снизится, а публичный рейтинг сохранится до следующего подтверждения. Изменений схемы SQLite или повторного seed не требуется.
+Например: после сохранения полной карточки `previewRating.score=100`, а `rating.score=0`. Повторный GET сохраняет это различие. После подтверждения оба равны 100. Если очистить поле в опубликованной задаче, предварительный балл снизится, а публичный рейтинг сохранится до следующего подтверждения. Для предварительного рейтинга отдельной миграции или повторного seed не требуется.
 
 `Question`: `{id,field,text,sourceRevision}`. `Answer`: `{questionId,value,skipped}`. При пропуске `value:null, skipped:true`; не превращать пропуск в выдуманный ответ.
+
+`questions` — текущая партия вопросов, `questionHistory` — архив вопросов, включая текущие. Повторный анализ не удаляет связь старых ответов с исходным вопросом. ID переиспользуется только при совпадении поля и текста; новая формулировка получает новый ID. `Question.sourceRevision` остаётся версией создания вопроса; при применении предложения используйте верхнеуровневый `sourceRevision` AI-ответа. Ответы из истории сохраняются и участвуют в сборке карточки. Эти данные доступны только владельцу.
+
+`answers` в PATCH заменяет весь массив ответов: сохраняйте предыдущие ответы и добавляйте изменённый ответ в конец массива. Так шаблонная сборка отдаёт приоритет последнему непропущенному ответу, если несколько вопросов относятся к одному полю. Максимум одного значения на `questionId`, длина ответа до 2000 символов; общий JSON-запрос ограничен 64 КБ.
 
 `Application`: `{id,taskId,teamId,teamName,idea,plan,timeline,prototypeUrl,status,createdAt,decidedAt}`. Пример timeline — «2 недели»; prototypeUrl — ссылка http/https, не файл.
 
@@ -201,7 +206,7 @@ const confirmed = response.task.confirmedRevision === response.task.revision && 
 | `GET /api/tasks?scope=mine` | — | `{items:TaskSummary[],total}`; рабочая область бизнеса |
 | `GET /api/tasks?scope=catalog&topic=education&level=ready` | фильтры необязательны; `limit/offset` необязательны | `{items:TaskSummary[],total}`; только опубликованные, сортировка `score DESC, publishedAt DESC` |
 | `GET /api/tasks/:id` | — | `{task:OwnerTask}` владельцу либо `{task:PublicTask}` команде |
-| `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision |
+| `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?,sourceRevision?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision; `sourceRevision` передаётся при применении AI |
 | `POST /api/tasks/:id/analyze` | `{revision,mode:"analyze"|"compose"}` | `{sourceRevision,questions:Question[],proposal:Card,warnings:string[],mode:"live"|"cached"|"template"}`; AI предлагает, сам не сохраняет Card |
 | `POST /api/tasks/:id/confirm` | `{revision,confirmed:true}` | `{task:OwnerTask,rating:Rating}`; подтверждает текущий Card и пересчитывает баллы |
 | `POST /api/tasks/:id/publish` | `{revision}` | `{task:OwnerTask}`; требуется подтверждённая текущая версия, порога рейтинга нет |
@@ -209,7 +214,27 @@ const confirmed = response.task.confirmedRevision === response.task.revision && 
 | `GET /api/tasks/:id/applications` | `limit/offset` необязательны | `{items:Application[],total}`; владелец видит все, команда — свои |
 | `PATCH /api/applications/:id` | `{status:"selected"|"rejected"}` | `{application:Application}`; действие бизнеса по одному отклику |
 
-`POST /analyze` в режиме `analyze` возвращает **3–5 вопросов**. Frontend показывает их и сохраняет ответы через `PATCH /tasks/:id` в `answers`; каждый ответ `{questionId,value,skipped}`. В режиме `compose` backend читает **уже сохранённые** ответы и возвращает `proposal`, который пользователь проверяет/редактирует. Чтобы применить его, frontend отправляет `cardPatch` через PATCH; затем отдельный confirm. Если AI недоступен, тот же endpoint возвращает `mode:"template"` и вопросы по шаблону; UI честно показывает эту метку.
+`POST /analyze` в режиме `analyze` возвращает **3–5 вопросов**. Frontend показывает их и сохраняет ответы через `PATCH /tasks/:id` в `answers`; каждый ответ `{questionId,value,skipped}`. В обоих режимах backend использует исходный текст и **уже сохранённые** ответы, в том числе на архивные вопросы. `compose` работает и без предварительного применения результата `analyze`.
+
+Предложение заполняет только незаполненные поля. Непустые сохранённые значения и поля, явно изменённые пользователем (в том числе очищенные до `null`), защищены от автоматической замены. Отправка полной карточки не защищает неизменённые пустые поля. Принятые и сохранённые предложения также становятся частью пользовательской карточки. Шаблонный режим извлекает только явно распознаваемые сведения; неизвестные значения остаются `null`, неоднозначные ответы требуют ручной проверки. AI сам не изменяет `workingCard`, подтверждённый рейтинг или публикацию.
+
+Для применения предложения frontend отправляет отдельный PATCH только с `revision`, `cardPatch` и `sourceRevision` из AI-ответа; изменения текста, темы и ответов сохраняются заранее обычным PATCH. Затем пользователь отдельно подтверждает сведения. Backend отклоняет устаревшее предложение с 409 и защищает уже заполненные/очищенные поля даже при передаче полной карточки. Пример:
+
+```ts
+// Нельзя заменять локальные несохранённые правки старым предложением.
+if (dirty || task.revision !== aiResult.sourceRevision) {
+  // Сохранить правки и получить новое предложение; показать объяснение пользователю.
+  return;
+}
+const response = await api.patchTask(task.id, {
+  revision: task.revision,
+  sourceRevision: aiResult.sourceRevision,
+  cardPatch: aiResult.proposal,
+});
+// Показать response.task. При 409 сохранить локальный ввод и предложить обновить анализ.
+```
+
+Без `sourceRevision` PATCH остаётся обычным ручным редактированием и может менять ранее заполненные поля. Если AI недоступен, тот же endpoint возвращает `mode:"template"`; UI честно показывает эту метку. Для защиты вручную очищенных полей и истории вопросов сервер автоматически добавляет служебные колонки SQLite при запуске; повторный seed не требуется.
 
 Пример изменения вложенного поля:
 

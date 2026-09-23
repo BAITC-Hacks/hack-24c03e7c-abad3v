@@ -35,6 +35,8 @@ db.exec(`
     confirmed_topic TEXT,
     working_card_json TEXT NOT NULL,
     questions_json TEXT NOT NULL DEFAULT '[]',
+    question_history_json TEXT NOT NULL DEFAULT '[]',
+    protected_fields_json TEXT NOT NULL DEFAULT '[]',
     answers_json TEXT NOT NULL DEFAULT '[]',
     revision INTEGER NOT NULL DEFAULT 1,
     confirmed_card_json TEXT,
@@ -82,6 +84,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_applications_team ON applications(team_id);
 `);
 
+// Existing demo databases are upgraded in place without recreating tasks.
+const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name));
+for (const column of ['question_history_json', 'protected_fields_json']) {
+  if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT NOT NULL DEFAULT '[]'`);
+}
+
 export const now = () => new Date().toISOString();
 export const encode = (value) => JSON.stringify(value);
 export const decode = (value) => value === null ? null : JSON.parse(value);
@@ -103,6 +111,12 @@ export function actorFromRow(row) {
   return { id: row.id, kind: row.kind, name: row.name, profile: decode(row.profile_json) };
 }
 
+export function questionHistoryFromRow(row) {
+  // Include pre-migration questions so saved answers remain readable immediately.
+  return [...new Map([...decode(row.question_history_json), ...decode(row.questions_json)]
+    .map((question) => [question.id, question])).values()];
+}
+
 export function taskFromRow(row) {
   if (!row) return null;
   const workingCard = decode(row.working_card_json);
@@ -114,6 +128,7 @@ export function taskFromRow(row) {
     previewRating: scoreCard(workingCard),
     confirmedCard: decode(row.confirmed_card_json),
     questions: decode(row.questions_json),
+    questionHistory: questionHistoryFromRow(row),
     answers: decode(row.answers_json),
     revision: row.revision,
     confirmedRevision: row.confirmed_revision,
