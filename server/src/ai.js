@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import { CARD_PATHS, getField } from './card.js';
 import { addFact, canSuggest, protectedPaths, sourcesFor, startingProposal } from './proposal.js';
+import { normalizeQuestionOptions } from '../../shared/question-options.js';
 export { templateResult } from './template.js';
 
 const systemPrompt = `Ты помогаешь бизнесу описать учебную задачу для студенческой команды.
@@ -10,13 +11,16 @@ const systemPrompt = `Ты помогаешь бизнесу описать уч
 Для каждого ненулевого факта укажи sourceId и точную цитату из этого источника.
 Если сведения неизвестны, не заполняй поле. Если сведения противоречат друг другу, добавь предупреждение.
 В режиме analyze задай 3–5 разных предметных вопросов о самых важных пробелах.
+Для каждого вопроса предложи в options обычно три коротких, различающихся варианта ответа, уместных для описания задачи; допустимо от двух до четырёх, когда это осмысленно. label — короткая подпись, value — готовый ответ для выбора пользователем.
+Варианты — только предложения для выбора, а не установленные факты. Никогда не переноси их в facts или карточку без ответа пользователя. Не придумывай в вариантах конкретные даты, контакты, числовые показатели или наличие конкретных данных.
+Для data.availability используй только значения available, planned, unavailable; для constraints.deadlineMode — fixed, flexible. Для contact.channel и constraints.deadlineDate возвращай options: []; эти сведения пользователь вводит сам.
 В обоих режимах используй исходное описание и сохранённые ответы, включая ответы на предыдущие вопросы.
 Заполняй только пустые поля. Не заполняй поля из filledFields и protectedFields; их текущие значения уже сохранены пользователем.
 В режиме compose собери цельную карточку из описания и ответов; вопросы могут отсутствовать.
 Не считай рейтинг, не публикуй задачу и не выбирай команду.
 Отвечай на русском и только по переданной JSON Schema.`;
 
-export const AI_PROMPT_VERSION = 'v4-grounded-editor';
+export const AI_PROMPT_VERSION = 'v5-guided-answers';
 export const AI_REQUEST_MAX_BYTES = 64 * 1024;
 export const MODEL_PRICES = {
   'gpt-6-sol': { input: 2, output: 10 },
@@ -37,7 +41,11 @@ const schema = {
       id: { type: 'string' },
       field: { type: 'string', enum: CARD_PATHS },
       text: { type: 'string' },
-    }, required: ['id', 'field', 'text'], additionalProperties: false } },
+      options: { type: 'array', maxItems: 4, items: { type: 'object', properties: {
+        label: { type: 'string', maxLength: 80 },
+        value: { type: 'string', maxLength: 300 },
+      }, required: ['label', 'value'], additionalProperties: false } },
+    }, required: ['id', 'field', 'text', 'options'], additionalProperties: false } },
     warnings: { type: 'array', items: { type: 'string' } },
   },
   required: ['facts', 'missingFields', 'questions', 'warnings'],
@@ -47,7 +55,11 @@ const schema = {
 const responseSchema = z.object({
   facts: z.array(z.object({ field: z.enum(CARD_PATHS), value: z.string().nullable(), sourceId: z.string(), quote: z.string().nullable() }).strict()).max(30),
   missingFields: z.array(z.enum(CARD_PATHS)).max(CARD_PATHS.length),
-  questions: z.array(z.object({ id: z.string(), field: z.enum(CARD_PATHS), text: z.string().min(8).max(300) }).strict()).max(5),
+  questions: z.array(z.object({
+    id: z.string(), field: z.enum(CARD_PATHS), text: z.string().min(8).max(300),
+    // An invalid optional control must not discard otherwise grounded card facts.
+    options: z.array(z.object({ label: z.string().max(80), value: z.string().max(300) }).strict()).max(4).optional().catch(undefined),
+  }).strict()).max(5),
   warnings: z.array(z.string().max(400)).max(10),
 }).strict();
 
@@ -91,7 +103,7 @@ function requestSize(request) {
 }
 
 export function prepareLiveRequest(task, mode) {
-  const maxOutputTokens = mode === 'analyze' ? 1200 : 1800;
+  const maxOutputTokens = mode === 'analyze' ? 3200 : 1800;
   const baseline = startingProposal(task);
   const input = [
     { role: 'system', content: systemPrompt },
@@ -125,7 +137,10 @@ export async function liveResult(task, mode, { prepared = prepareLiveRequest(tas
   if (mode === 'analyze' && (parsed.questions.length < 3 || new Set(parsed.questions.map((question) => question.field)).size !== parsed.questions.length)) throw new Error('AI must return three to five distinct questions');
   const { proposal, evidence } = composeLiveResult(task, parsed.facts, sources);
   return {
-    result: { questions: parsed.questions.map(({ field, text }) => ({ id: `q:${field}`, field, text })), proposal, evidence, warnings: parsed.warnings },
+    result: { questions: parsed.questions.map((question) => ({
+      id: `q:${question.field}`, field: question.field, text: question.text,
+      options: normalizeQuestionOptions(question, task, question.options),
+    })), proposal, evidence, warnings: parsed.warnings },
     usage: { model: request.model, requestId: response.id, inputTokens: response.usage?.input_tokens ?? null, outputTokens: response.usage?.output_tokens ?? null, durationMs: Date.now() - started },
   };
 }

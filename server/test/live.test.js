@@ -69,6 +69,59 @@ const modelResponse = (body = modelBody(), patch = {}) => ({
 });
 const stubClient = (create) => ({ responses: { create } });
 
+test('live clarification options are normalized suggestions and do not become card facts', async () => {
+  const source = task({ draftText: 'Нужен сайт для студентов, чтобы находить свободные аудитории.' });
+  const metric = { label: 'Время поиска', value: 'Оценивать время, за которое студент находит свободную аудиторию.' };
+  const questions = [
+    { id: 'metric', field: 'success.metric', text: 'Как будем проверять удобство поиска?', options: [metric] },
+    { id: 'data', field: 'data.availability', text: 'Данные уже готовы или их нужно собрать?', options: [{ label: 'Конечно', value: 'yes' }] },
+    { id: 'contact', field: 'contact.channel', text: 'Как связаться с заказчиком?', options: [{ label: 'Email', value: 'invented@example.org' }] },
+    { id: 'date', field: 'constraints.deadlineDate', text: 'К какой дате нужен результат?', options: [{ label: 'Дата', value: '2026-10-15' }] },
+  ];
+  let submitted;
+  const { result } = await liveResult(source, 'analyze', { client: stubClient(async (request) => {
+    submitted = request;
+    return modelResponse(modelBody({ questions }));
+  }) });
+  assert.equal(submitted.max_output_tokens, 3200);
+  const questionSchema = submitted.text.format.schema.properties.questions.items;
+  assert.ok(questionSchema.required.includes('options'));
+  assert.equal(questionSchema.properties.options.maxItems, 4);
+  assert.ok(result.questions.find((question) => question.field === 'success.metric').options.some((option) => option.value === metric.value));
+  assert.deepEqual(new Set(result.questions.find((question) => question.field === 'data.availability').options.map((option) => option.value)), new Set(['available', 'planned', 'unavailable']));
+  assert.deepEqual(result.questions.find((question) => question.field === 'contact.channel').options, []);
+  assert.deepEqual(result.questions.find((question) => question.field === 'constraints.deadlineDate').options, []);
+  assert.deepEqual(result.proposal, emptyCard(), 'offered values are not confirmed facts');
+  assert.deepEqual(result.evidence, []);
+  assert.deepEqual(source.workingCard, emptyCard());
+  assert.deepEqual(source.answers, []);
+  const nextInput = prepareLiveRequest({ ...source, questions: result.questions }, 'compose').input[1].content;
+  assert.equal(nextInput.includes(metric.value), false, 'unselected options must not become sources in the next request');
+});
+
+test('older question responses without options receive usable fallback suggestions', async () => {
+  const questions = ['need', 'context', 'data.availability'].map((field) => ({ id: field, field, text: `Какие сведения доступны: ${field}?` }));
+  const { result } = await liveResult(task(), 'analyze', { client: stubClient(async () => modelResponse(modelBody({ questions }))) });
+  for (const question of result.questions) {
+    assert.ok(question.options.length > 0 && question.options.length <= 4);
+    assert.ok(question.options.every((option) => typeof option.label === 'string' && typeof option.value === 'string'));
+  }
+});
+
+test('invalid optional choices fall back without discarding valid cited facts', async () => {
+  const questions = [
+    { id: 'context', field: 'context', text: 'Как решается задача сейчас?', options: 'wrong shape' },
+    { id: 'data', field: 'data.source', text: 'Какие данные доступны команде?', options: [{ label: 'x'.repeat(81), value: 'y'.repeat(301) }] },
+    { id: 'metric', field: 'success.metric', text: 'Как проверить результат работы?', options: Array.from({ length: 5 }, () => ({ label: 'Вариант', value: 'Показатель' })) },
+  ];
+  const { result } = await liveResult(task(), 'analyze', { client: stubClient(async () => modelResponse(modelBody({ facts: [fact('users', 'Студенты.')], questions }))) });
+  assert.equal(result.proposal.users, 'Студенты.');
+  for (const question of result.questions) {
+    assert.ok(question.options.length > 0 && question.options.length <= 4);
+    assert.ok(question.options.every((option) => option.label.length <= 80 && option.value.length <= 300));
+  }
+});
+
 test('live request accepts a full Russian description and five long saved answers without text duplication', async () => {
   const fields = ['data.source', 'result.scope', 'success.metric', 'constraints.technologyAccess', 'contact.feedback'];
   const source = task({

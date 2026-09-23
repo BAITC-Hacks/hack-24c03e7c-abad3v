@@ -68,6 +68,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(analyzed.status, 200);
     assert.equal(analyzed.body.mode, 'template');
     assert.ok(analyzed.body.questions.length >= 3);
+    assert.ok(analyzed.body.questions.every((question) => Array.isArray(question.options) && question.options.length <= 4));
     const restoredAnalysis = (await request(`/api/tasks/${id}`, { cookie: businessCookie })).body.task.lastAnalysis;
     assert.deepEqual(restoredAnalysis, analyzed.body);
     assert.equal(restoredAnalysis.operation, 'analyze');
@@ -232,6 +233,36 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     const flexibleResult = await request(`/api/tasks/${classroomId}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: flexible.body.task.revision, mode: 'compose' } });
     assert.equal(flexibleResult.body.proposal.constraints.deadlineMode, 'flexible');
     assert.equal(flexibleResult.body.proposal.constraints.deadlineDate, null);
+    await t.test('answer suggestions survive reload and compose without being applied automatically', async () => {
+      const createdDraft = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: {
+        draftText: 'Нужен сайт для студентов, чтобы находить свободные аудитории.', topic: 'education',
+      } });
+      const path = `/api/tasks/${createdDraft.body.task.id}`;
+      const analyzed = await request(`${path}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: 1, mode: 'analyze' } });
+      assert.equal(analyzed.status, 200);
+      const question = analyzed.body.questions.find((item) => item.field === 'success.metric');
+      assert.ok(question?.options.length > 0);
+      const offered = question.options[0].value;
+      const reopened = (await request(path, { cookie: businessCookie })).body.task;
+      assert.deepEqual(reopened.questions, analyzed.body.questions);
+      assert.deepEqual(reopened.answers, []);
+      assert.equal(reopened.workingCard.success.metric, null);
+      assert.equal(reopened.previewRating.score, 0);
+      const answered = await request(path, { method: 'PATCH', cookie: businessCookie, body: {
+        revision: 1, answers: [{ questionId: question.id, value: offered, skipped: false }],
+      } });
+      assert.equal(answered.status, 200);
+      const composed = await request(`${path}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: 2, mode: 'compose' } });
+      assert.equal(composed.status, 200);
+      assert.deepEqual(composed.body.questions, analyzed.body.questions);
+      assert.equal(composed.body.proposal.success.metric, offered);
+      assert.equal((await request(path, { cookie: businessCookie })).body.task.workingCard.success.metric, null);
+      const applied = await request(path, { method: 'PATCH', cookie: businessCookie, body: {
+        revision: 2, sourceRevision: 2, cardPatch: { success: { metric: offered } },
+      } });
+      assert.equal(applied.status, 200);
+      assert.equal(applied.body.task.workingCard.success.metric, offered);
+    });
     await t.test('cached analysis restores the same proposal, timestamp and question IDs', async () => {
       const createdDraft = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: {
         draftText: 'Нужен сайт для студентов.', topic: 'education',
@@ -257,14 +288,15 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
         assert.equal(cached.status, 200);
         assert.equal(cached.body.mode, 'cached');
         assert.equal(cached.body.generatedAt, generatedAt);
-        assert.deepEqual(cached.body.questions, questions);
+        assert.deepEqual(cached.body.questions.map(({ options, ...question }) => question), questions);
+        assert.ok(cached.body.questions.every((question) => question.options.length > 0 && question.options.length <= 4));
         assert.deepEqual(cached.body.evidence, result.evidence);
         const reopened = (await request(path, { cookie: businessCookie })).body.task;
         assert.equal(reopened.revision, 1);
         assert.equal(reopened.workingCard.title, null);
         assert.equal(reopened.rating.score, 0);
         assert.deepEqual(reopened.lastAnalysis, { ...cached.body, mode: 'live' });
-        assert.deepEqual(reopened.questions, questions);
+        assert.deepEqual(reopened.questions, cached.body.questions);
         assert.equal(reopened.questions.some((question) => question.id === 'alternate'), false);
         assert.ok(reopened.questionHistory.some((q) => q.id === 'alternate'));
         const answered = await request(path, { method: 'PATCH', cookie: businessCookie, body: {

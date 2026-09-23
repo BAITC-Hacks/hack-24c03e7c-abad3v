@@ -7,6 +7,7 @@ import { z, ZodError } from 'zod';
 import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, getField, setField, mergeCard, scoreCard, validatePublishable } from './card.js';
 import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, questionHistoryFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
 import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, prepareLiveRequest, templateResult } from './ai.js';
+import { normalizeQuestionOptions } from '../../shared/question-options.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -299,7 +300,7 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   const history = questionHistoryFromRow(latest);
   const questions = body.mode === 'analyze' ? result.questions.map((q) => {
     const existing = history.find((item) => item.field === q.field && item.text === q.text) ?? history.find((item) => item.field === q.field);
-    const question = { ...q, id: existing?.id ?? (mode === 'cached' ? q.id : `q:${q.field}`), sourceRevision: existing?.sourceRevision ?? row.revision };
+    const question = { ...q, options: normalizeQuestionOptions(q, task, q.options), id: existing?.id ?? (mode === 'cached' ? q.id : `q:${q.field}`), sourceRevision: existing?.sourceRevision ?? row.revision };
     const index = history.findIndex((item) => item.id === question.id);
     if (index < 0) history.push(question);
     else history[index] = question;

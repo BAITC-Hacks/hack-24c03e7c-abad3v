@@ -2,6 +2,7 @@ import { getField, scoreCard, setField } from './card.js';
 import { latestAnswerSources, latestAnswerStates } from './sources.js';
 import { addFact, canSuggest, protectedPaths, startingProposal } from './proposal.js';
 import { isUnknownValue } from '../../shared/card-values.js';
+import { getQuestionOptions } from '../../shared/question-options.js';
 
 const questionText = {
   title: 'Как коротко назвать задачу, чтобы команда поняла её назначение?',
@@ -229,7 +230,10 @@ export function templateResult(task, mode) {
   }
   return {
     ...result,
-    questions: fields.map((field) => ({ id: `q:${field}`, field, text: questionText[field] })),
+    questions: fields.map((field) => {
+      const question = { id: `q:${field}`, field, text: questionText[field] };
+      return { ...question, options: getQuestionOptions(question, task) };
+    }),
     warnings,
   };
 }

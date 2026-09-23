@@ -1,5 +1,6 @@
 import { actors, applications, blankCard, datasetVersion, labelForTopic, tasks } from './fixtures'
 import { hasMeaningfulValue } from '../shared/card-values.js'
+import { normalizeQuestionOptions } from '../shared/question-options.js'
 import type { AiResult, Answer, Application, Card, Level, OwnerTask, PublicTask, Rating, TaskSummary, Topic } from './types'
 
 type Evidence = { field: string; sourceId: string; quote: string }
@@ -156,6 +157,9 @@ function refresh(task: StoredTask): StoredTask {
   task.hasUnpublishedChanges = task.publicationStatus === 'published' && task.publishedRevision !== task.revision
   return task
 }
+function withQuestionOptions(question: AiResult['questions'][number], task: StoredTask) {
+  return { ...question, options: normalizeQuestionOptions(question, task) }
+}
 for (const task of taskStore) {
   if (!Array.isArray(task.questionHistory)) {
     task.questionHistory = structuredClone(task.questions)
@@ -169,6 +173,9 @@ for (const task of taskStore) {
   task.publishedTopic ||= task.topic
   task.confirmedTopic ||= task.topic
   task.manualFields ||= []
+  task.questions = task.questions.map((question) => withQuestionOptions(question, task))
+  task.questionHistory = task.questionHistory?.map((question) => withQuestionOptions(question, task))
+  if (task.aiResult) task.aiResult.questions = task.aiResult.questions.map((question) => withQuestionOptions(question, task))
   refresh(task)
 }
 persist()
@@ -299,7 +306,7 @@ function templateResult(task: StoredTask, mode: 'analyze' | 'compose'): AiResult
   }
   const priorities = ['data.availability', 'success.metric', 'result.artifact', 'constraints.deadlineMode', 'data.source', 'users', 'result.scope', 'success.target', 'constraints.technologyAccess', 'contact.channel', 'contact.consultation', 'contact.feedback', 'need', 'context']
   if (proposal.constraints.deadlineMode === 'fixed' && !validDate(proposal.constraints.deadlineDate)) priorities.unshift('constraints.deadlineDate')
-  const questions = mode === 'compose' ? structuredClone(task.questions) : priorities.filter((field) => !filled(fieldValue(proposal, field))).slice(0, 5).map((field) => ({ id: `q:${field}`, field, text: questionText[field], sourceRevision: task.revision }))
+  const questions = mode === 'compose' ? structuredClone(task.questions) : priorities.filter((field) => !filled(fieldValue(proposal, field))).slice(0, 5).map((field) => withQuestionOptions({ id: `q:${field}`, field, text: questionText[field], sourceRevision: task.revision }, task))
   return {
     sourceRevision: task.revision, questions, proposal, evidence, warnings: [], mode: 'template', originMode: 'template', operation: mode, generatedAt: new Date().toISOString(), stale: false,
     inputSnapshot: structuredClone({ draftText: task.draftText, topic: task.topic, answers: task.answers, manualFields: task.manualFields || [] }),

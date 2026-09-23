@@ -22,6 +22,10 @@ test('template copies the brief into an editable proposal without invented facts
   assert.deepEqual(source.workingCard, emptyCard());
   assert.ok(result.questions.length >= 3 && result.questions.length <= 5);
   assert.equal(new Set(result.questions.map(({ field }) => field)).size, result.questions.length);
+  for (const question of result.questions) {
+    assert.ok(Array.isArray(question.options) && question.options.length <= 4);
+    if (!['contact.channel', 'constraints.deadlineDate'].includes(question.field)) assert.ok(question.options.length > 0);
+  }
   assert.deepEqual(mergeCard(emptyCard(), result.proposal), result.proposal);
 });
 
