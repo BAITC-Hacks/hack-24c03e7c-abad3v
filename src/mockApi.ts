@@ -1,79 +1,218 @@
-import { actors, applications, blankCard, labelForTopic, tasks, toSummary } from './fixtures'
+import { actors, applications, blankCard, labelForTopic, tasks } from './fixtures'
 import type { AiResult, Answer, Application, Card, Level, OwnerTask, PublicTask, Rating, TaskSummary, Topic } from './types'
 
+type Evidence = { field: string; sourceId: string; quote: string }
+type StoredTask = OwnerTask & {
+  previewRating?: Rating; publishedRevision?: number | null; publishedCard?: Card | null
+  publishedRating?: Rating | null; publishedTopic?: Topic; confirmedTopic?: Topic
+  hasUnpublishedChanges?: boolean; aiResult?: AiResult | null; manualFields?: string[]
+}
+const storageKey = 'ai-sana.mock.v2'
 let activeActor = actors[0]
-let taskStore = structuredClone(tasks)
+let taskStore: StoredTask[] = structuredClone(tasks)
 let applicationStore = structuredClone(applications)
-let nextTask = 6
-let nextApplication = 6
 
+// Mock data stays local to this browser. Private browsing and disabled storage still work.
+try {
+  const raw = localStorage.getItem(storageKey)
+  if (raw) {
+    const saved = JSON.parse(raw) as { tasks?: StoredTask[]; applications?: Application[]; actorId?: string }
+    if (Array.isArray(saved.tasks) && saved.tasks.every((task) => task.id && task.workingCard && Array.isArray(task.answers))) taskStore = saved.tasks
+    if (Array.isArray(saved.applications)) applicationStore = saved.applications
+    activeActor = actors.find((actor) => actor.id === saved.actorId) || activeActor
+  }
+} catch { /* A corrupt or unavailable local cache must not block the demo. */ }
+
+function persist() {
+  try { localStorage.setItem(storageKey, JSON.stringify({ tasks: taskStore, applications: applicationStore, actorId: activeActor.id })) }
+  catch { /* Continue in memory when browser storage is unavailable. */ }
+}
+
+const nextId = (items: Array<{ id: string }>, prefix: string) => Math.max(0, ...items.map((item) => Number(item.id.replace(`${prefix}-`, '')) || 0)) + 1
+let nextTask = nextId(taskStore, 'task')
+let nextApplication = nextId(applicationStore, 'app')
 const wait = <T,>(value: T): Promise<T> => new Promise((resolve) => window.setTimeout(() => resolve(structuredClone(value)), 180))
 const levelForScore = (score: number): Rating['level'] => score < 40 ? 'needs_clarification' : score < 70 ? 'workable' : score < 90 ? 'ready' : 'priority'
+const fieldValue = (card: Card, path: string): string | null => path.split('.').reduce<unknown>((value, key) => (value as Record<string, unknown> | null)?.[key], card) as string | null
+function setField(card: Card, path: string, value: string | null) {
+  const parts = path.split('.')
+  const parent = parts.slice(0, -1).reduce<unknown>((object, key) => (object as Record<string, unknown>)[key], card) as Record<string, unknown>
+  parent[parts[parts.length - 1]] = value
+}
+const filled = (value: string | null) => Boolean(value?.trim() && !/^(не знаю|потом|нет информации|тест|[-—?]+)$/i.test(value.trim()))
+const validDate = (value: string | null): boolean => {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value
+}
 
-// Mock-only scoring mirrors the API response shape. The UI never computes a score.
+// The mock API owns its scoring, using the same weights and checks as the backend.
 function scoreCard(card: Card): Rating {
-  const fields: Array<[string, string, string[]]> = [
-    ['contextNeed', 'Контекст и потребность', ['context', 'need']],
-    ['data', 'Данные и материалы', ['data.availability', 'data.source']],
-    ['result', 'Ожидаемый результат', ['result.artifact', 'result.scope']],
-    ['success', 'Критерии успеха', ['success.metric', 'success.target']],
-    ['constraints', 'Ограничения', ['constraints.deadlineMode', 'constraints.technologyAccess']],
-    ['users', 'Пользователи', ['users']],
-    ['contact', 'Связь с бизнесом', ['contact.channel', 'contact.consultation', 'contact.feedback']],
+  const fields: Array<[string, string, Array<[string, number, string]>]> = [
+    ['contextNeed', 'Контекст и потребность', [['context', 10, 'Опишите текущую ситуацию'], ['need', 10, 'Уточните, что нужно изменить']]],
+    ['data', 'Данные и материалы', [['data.availability', 10, 'Укажите доступность данных'], ['data.source', 10, 'Назовите источник или план получения']]],
+    ['result', 'Ожидаемый результат', [['result.artifact', 10, 'Опишите результат для команды'], ['result.scope', 5, 'Уточните границы результата']]],
+    ['success', 'Критерии успеха', [['success.metric', 10, 'Укажите проверяемый показатель'], ['success.target', 5, 'Опишите условие приёмки']]],
+    ['constraints', 'Ограничения', [['constraints.deadlineMode', 5, 'Укажите срок'], ['constraints.technologyAccess', 5, 'Опишите технологии или доступы']]],
+    ['users', 'Пользователи', [['users', 10, 'Укажите пользователей']]],
+    ['contact', 'Связь с бизнесом', [['contact.channel', 4, 'Укажите рабочий контакт'], ['contact.consultation', 3, 'Опишите формат консультаций'], ['contact.feedback', 3, 'Уточните порядок обратной связи']]],
   ]
-  const caps = [20, 20, 15, 15, 10, 10, 10]
-  const missingLabels: Record<string, string> = {
-    context: 'Опишите текущую ситуацию', need: 'Уточните, что нужно изменить', 'data.availability': 'Укажите доступность данных', 'data.source': 'Назовите источник или план получения',
-    'result.artifact': 'Опишите результат для команды', 'result.scope': 'Уточните границы результата', 'success.metric': 'Укажите проверяемый показатель', 'success.target': 'Опишите условие приёмки',
-    'constraints.deadlineMode': 'Укажите срок', 'constraints.technologyAccess': 'Опишите технологии или доступы', users: 'Укажите пользователей', 'contact.channel': 'Укажите рабочий контакт',
-    'contact.consultation': 'Опишите формат консультаций', 'contact.feedback': 'Уточните порядок обратной связи',
-  }
   const missingFields: string[] = []
-  const breakdown = fields.map(([key, label, paths], index) => {
-    const present = paths.filter((path) => {
-      const parts = path.split('.')
-      let value: unknown = card
-      for (const part of parts) value = (value as Record<string, unknown> | null)?.[part]
-      return typeof value === 'string' ? value.trim().length > 0 : value !== null && value !== undefined
-    })
-    const absent = paths.filter((path) => !present.includes(path))
-    missingFields.push(...absent)
-    return { key, label, earned: Math.round(caps[index] * present.length / paths.length), max: caps[index], missing: absent.map((path) => missingLabels[path]) }
+  const breakdown = fields.map(([key, label, paths]) => {
+    let earned = 0
+    const missing: string[] = []
+    for (const [path, weight, hint] of paths) {
+      const value = fieldValue(card, path)
+      let present = filled(value)
+      if (path === 'data.availability') present = ['available', 'planned', 'unavailable'].includes(value || '')
+      if (path === 'constraints.deadlineMode') present = value === 'flexible' || value === 'fixed' && validDate(card.constraints.deadlineDate)
+      if (path === 'contact.channel') present = present && (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value || '') || /^https?:\/\//i.test(value || ''))
+      if (present) earned += weight
+      else { missingFields.push(path); missing.push(hint) }
+    }
+    return { key, label, earned, max: paths.reduce((sum, [, weight]) => sum + weight, 0), missing }
   })
   const score = breakdown.reduce((sum, item) => sum + item.earned, 0)
-  return { score, level: levelForScore(score), breakdown, missingFields, scoringVersion: 'mock-v1' }
+  return { score, level: levelForScore(score), breakdown, missingFields, scoringVersion: 'mock-v2' }
 }
 
 function mergeCard(base: Card, patch: Partial<Card>): Card {
-  return {
-    ...base, ...patch,
-    data: { ...base.data, ...patch.data }, result: { ...base.result, ...patch.result },
-    success: { ...base.success, ...patch.success }, constraints: { ...base.constraints, ...patch.constraints },
-    contact: { ...base.contact, ...patch.contact },
-  }
+  return { ...base, ...patch, data: { ...base.data, ...patch.data }, result: { ...base.result, ...patch.result }, success: { ...base.success, ...patch.success }, constraints: { ...base.constraints, ...patch.constraints }, contact: { ...base.contact, ...patch.contact } }
+}
+
+function refresh(task: StoredTask): StoredTask {
+  task.previewRating = scoreCard(task.workingCard)
+  task.hasUnpublishedChanges = task.publicationStatus === 'published' && task.publishedRevision !== task.revision
+  return task
+}
+for (const task of taskStore) {
+  if (task.publishedCard === undefined) task.publishedCard = task.publicationStatus === 'published' ? structuredClone(task.confirmedCard) : null
+  if (task.publishedRevision === undefined) task.publishedRevision = task.publicationStatus === 'published' ? task.confirmedRevision : null
+  if (task.publishedRating === undefined) task.publishedRating = task.publishedCard ? structuredClone(task.rating) : null
+  task.publishedTopic ||= task.topic
+  task.confirmedTopic ||= task.topic
+  task.manualFields ||= []
+  refresh(task)
 }
 
 function requireBusiness() {
-  if (activeActor?.kind !== 'business') throw { status: 403, error: { code: 'ROLE_FORBIDDEN', message: 'Это действие доступно бизнесу.' } }
+  if (activeActor.kind !== 'business') throw { status: 403, error: { code: 'ROLE_FORBIDDEN', message: 'Это действие доступно бизнесу.' } }
 }
 function requireTeam() {
-  if (activeActor?.kind !== 'team') throw { status: 403, error: { code: 'ROLE_FORBIDDEN', message: 'Это действие доступно команде.' } }
+  if (activeActor.kind !== 'team') throw { status: 403, error: { code: 'ROLE_FORBIDDEN', message: 'Это действие доступно команде.' } }
 }
 function requireTask(id: string) {
   const task = taskStore.find((item) => item.id === id)
   if (!task) throw { status: 404, error: { code: 'NOT_FOUND', message: 'Задача не найдена.' } }
-  return task
+  return refresh(task)
 }
-function ownerTask(task: OwnerTask) {
-  if (activeActor?.kind !== 'business') throw { status: 403, error: { code: 'ROLE_FORBIDDEN', message: 'Задача не принадлежит профилю.' } }
-  return task
+function requireRevision(task: StoredTask, revision: number) {
+  if (task.revision !== revision) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Задача изменилась. Загрузите актуальную версию.' } }
+}
+function summarize(task: StoredTask, published = false): TaskSummary {
+  const card = published ? task.publishedCard! : task.workingCard
+  const rating = published ? task.publishedRating || scoreCard(card) : task.rating
+  return {
+    id: task.id, title: card.title || task.draftText.slice(0, 60), topic: published ? task.publishedTopic || task.topic : task.topic,
+    rating, publicationStatus: task.publicationStatus, publishedAt: task.publishedAt,
+    applicationCount: applicationStore.filter((application) => application.taskId === task.id).length,
+    pendingApplicationCount: applicationStore.filter((application) => application.taskId === task.id && application.status === 'pending').length,
+    need: card.need, result: card.result.artifact, dataAvailability: card.data.availability,
+    deadline: card.constraints.deadlineMode === 'flexible' ? 'Гибкий срок' : card.constraints.deadlineDate,
+    previewRating: published ? rating : scoreCard(card), hasUnpublishedChanges: !published && task.hasUnpublishedChanges,
+    updatedAt: task.updatedAt,
+  }
 }
 
-const questionTemplates = [
-  { field: 'success.metric', text: 'По какому признаку вы поймёте, что решение действительно помогло?' },
-  { field: 'data.availability', text: 'Какие данные или материалы уже доступны команде?' },
-  { field: 'contact.feedback', text: 'Как часто команда сможет получать обратную связь от вас?' },
-]
+const questionText: Record<string, string> = {
+  context: 'Как задача решается сейчас и что в этом процессе не работает?',
+  need: 'Какую конкретную проблему нужно решить?',
+  users: 'Кто будет пользоваться решением?',
+  'data.availability': 'Есть ли данные или материалы для работы команды?',
+  'data.source': 'Какие именно данные доступны или как команда сможет их получить?',
+  'result.artifact': 'Что команда должна показать в конце работы?',
+  'result.scope': 'Какие функции входят в первый результат?',
+  'success.metric': 'Как проверите результат? Например: из пяти студентов минимум четверо находят аудиторию без подсказки.',
+  'success.target': 'Какое конкретное условие будет означать, что результат принят?',
+  'constraints.deadlineMode': 'Есть ли точный срок или команда может предложить свой?',
+  'constraints.deadlineDate': 'К какой дате нужен результат?',
+  'constraints.technologyAccess': 'Есть ли ограничения по технологиям или доступам?',
+  'contact.channel': 'По какому рабочему email или ссылке с вами связаться?',
+  'contact.consultation': 'Как часто команда сможет консультироваться с вами?',
+  'contact.feedback': 'Как и когда команда получит вашу обратную связь?',
+}
+
+function templateResult(task: StoredTask, mode: 'analyze' | 'compose'): AiResult {
+  const proposal = structuredClone(task.workingCard)
+  const previousEvidence = task.aiResult?.evidence || []
+  const protectedFields = new Set(task.manualFields || [])
+  const sources = new Map([['draft', task.draftText], ...task.answers.filter((answer) => !answer.skipped && answer.value).map((answer) => [`answer:${answer.questionId}`, answer.value!] as [string, string])])
+  const evidence: Evidence[] = []
+  for (const item of previousEvidence) {
+    if (protectedFields.has(item.field)) continue
+    if (sources.get(item.sourceId)?.includes(item.quote)) evidence.push(item)
+    else if (task.aiResult && fieldValue(proposal, item.field) === fieldValue(task.aiResult.proposal, item.field)) setField(proposal, item.field, null)
+  }
+  const propose = (field: string, value: string | null, sourceId: string, quote: string, replace = false) => {
+    if (!value || protectedFields.has(field)) return
+    const current = fieldValue(proposal, field)
+    if (current && current !== 'Новая задача' && !replace && !previousEvidence.some((item) => item.field === field && item.sourceId === sourceId)) return
+    setField(proposal, field, value)
+    const previous = evidence.findIndex((item) => item.field === field)
+    if (previous >= 0) evidence.splice(previous, 1)
+    evidence.push({ field, sourceId, quote })
+  }
+  const draft = task.draftText.trim()
+  const sentences = draft.match(/[^.!?\n]+[.!?]?/g)?.map((sentence) => sentence.trim()).filter(Boolean) || []
+  const sentenceFor = (pattern: RegExp) => sentences.find((sentence) => pattern.test(sentence))
+  if (draft) {
+    const first = sentences[0] || draft
+    const title = /аудитор/i.test(draft) && /свободн|поиск|найти|наход/i.test(draft) ? 'Поиск свободных аудиторий' : first.replace(/^(хотим|нужно|нужен|нужна|хочу)\s+/i, '').replace(/[.!?]$/, '').slice(0, 115)
+    propose('title', title.charAt(0).toUpperCase() + title.slice(1), 'draft', /аудитор/i.test(draft) ? sentenceFor(/аудитор/i) || first : first)
+    propose('context', draft.slice(0, 1000), 'draft', draft.slice(0, 1000))
+    const need = sentenceFor(/нуж|хотим|хочу|помоч|упрост|сократ|автоматиз|решить/i) || first
+    propose('need', need.slice(0, 1000), 'draft', need)
+    const userSentence = sentenceFor(/студент|ученик|школьник|преподавател|сотрудник|волонт[её]р/i)
+    if (userSentence) {
+      const groups = [['студент', 'Студенты'], ['ученик|школьник', 'Школьники'], ['преподавател', 'Преподаватели'], ['сотрудник', 'Сотрудники'], ['волонт[её]р', 'Волонтёры']]
+      propose('users', groups.filter(([pattern]) => new RegExp(pattern, 'i').test(userSentence)).map(([, label]) => label).join(', '), 'draft', userSentence)
+    }
+    const artifact = sentenceFor(/прототип|веб[- ]?сервис|приложени|сайт|дашборд|отч[её]т|макет|бот\b/i)
+    if (artifact) propose('result.artifact', artifact.slice(0, 1000), 'draft', artifact)
+    const scope = sentenceFor(/список|функци|включа|показыва|временн\S* слот/i)
+    if (scope) propose('result.scope', scope.slice(0, 1000), 'draft', scope)
+  }
+
+  for (const answer of task.answers) {
+    if (answer.skipped || !filled(answer.value)) continue
+    const field = task.questions.find((question) => question.id === answer.questionId)?.field || (answer.questionId.startsWith('q:') ? answer.questionId.slice(2) : undefined)
+    if (!field || !(field in questionText)) continue
+    const value = answer.value!.trim()
+    const source = `answer:${answer.questionId}`
+    if (field === 'data.availability') {
+      const normalized = ['available', 'planned', 'unavailable'].includes(value) ? value : /нет|недоступ|отсутств/i.test(value) ? 'unavailable' : /план|собер|собрат|позже|будут/i.test(value) ? 'planned' : /есть|доступ|готов/i.test(value) ? 'available' : null
+      propose(field, normalized, source, value, true)
+    } else if (field === 'constraints.deadlineMode' || field === 'constraints.deadlineDate') {
+      const dateMatch = value.match(/\d{4}-\d{2}-\d{2}/)?.[0]
+      const russianDate = value.match(/\b(\d{2})\.(\d{2})\.(\d{4})\b/)
+      const date = dateMatch || (russianDate ? `${russianDate[3]}-${russianDate[2]}-${russianDate[1]}` : null)
+      if (validDate(date)) {
+        propose('constraints.deadlineMode', 'fixed', source, value, true)
+        propose('constraints.deadlineDate', date, source, value, true)
+      } else if (value === 'flexible' || /гибк|нет срока|не огранич|по договор/i.test(value)) {
+        propose('constraints.deadlineMode', 'flexible', source, value, true)
+        if (!protectedFields.has('constraints.deadlineDate')) proposal.constraints.deadlineDate = null
+      } else if (value === 'fixed') propose('constraints.deadlineMode', 'fixed', source, value, true)
+    } else {
+      propose(field, value, source, value, true)
+      if (field === 'success.metric' && /\d|минимум|не менее|не больше|четверо|четыре|кажд|все |без подсказ/i.test(value)) propose('success.target', value, source, value, true)
+    }
+  }
+  const priorities = ['data.availability', 'success.metric', 'result.artifact', 'constraints.deadlineMode', 'data.source', 'users', 'result.scope', 'success.target', 'constraints.technologyAccess', 'contact.channel', 'contact.consultation', 'contact.feedback', 'need', 'context']
+  if (proposal.constraints.deadlineMode === 'fixed' && !validDate(proposal.constraints.deadlineDate)) priorities.unshift('constraints.deadlineDate')
+  const questions = mode === 'compose' ? [] : priorities.filter((field) => !filled(fieldValue(proposal, field))).slice(0, 5).map((field) => ({ id: `q:${field}`, field, text: questionText[field], sourceRevision: task.revision }))
+  return { sourceRevision: task.revision, questions, proposal, evidence, warnings: [], mode: 'template' }
+}
 
 export const mockApi = {
   async getActors() { return wait({ items: actors }) },
@@ -81,17 +220,16 @@ export const mockApi = {
     const actor = actors.find((item) => item.id === actorId)
     if (!actor) throw { status: 404, error: { code: 'ACTOR_NOT_FOUND', message: 'Демо-профиль не найден.' } }
     activeActor = actor
+    persist()
     return wait({ actor })
   },
   async listTasks(params: { scope: 'mine' | 'catalog'; topic?: Topic; level?: Level }) {
     let items: TaskSummary[]
     if (params.scope === 'mine') {
       requireBusiness()
-      items = taskStore.map(toSummary)
+      items = taskStore.map((task) => summarize(refresh(task)))
     } else {
-      items = taskStore.filter((item) => item.publicationStatus === 'published' && item.confirmedCard).map((item) => ({
-        ...toSummary(item), title: item.confirmedCard?.title || '', topic: item.topic, rating: item.rating,
-      })).sort((a, b) => b.rating.score - a.rating.score || (b.publishedAt || '').localeCompare(a.publishedAt || ''))
+      items = taskStore.filter((task) => task.publicationStatus === 'published' && task.publishedCard).map((task) => summarize(task, true)).sort((a, b) => b.rating.score - a.rating.score || (b.publishedAt || '').localeCompare(a.publishedAt || ''))
       if (params.topic) items = items.filter((item) => item.topic === params.topic)
       if (params.level) items = items.filter((item) => item.rating.level === params.level)
     }
@@ -99,71 +237,88 @@ export const mockApi = {
   },
   async getTask(id: string) {
     const task = requireTask(id)
-    if (activeActor?.kind === 'business') return wait({ task: ownerTask(task) })
-    if (!task.confirmedCard || task.publicationStatus !== 'published') throw { status: 404, error: { code: 'NOT_FOUND', message: 'Опубликованная задача не найдена.' } }
-    const publicTask: PublicTask = { id: task.id, topic: task.topic, card: task.confirmedCard, rating: task.rating, publicationStatus: 'published', publishedAt: task.publishedAt }
+    if (activeActor.kind === 'business') return wait({ task })
+    if (!task.publishedCard || task.publicationStatus !== 'published') throw { status: 404, error: { code: 'NOT_FOUND', message: 'Опубликованная задача не найдена.' } }
+    const publicTask: PublicTask = { id: task.id, topic: task.publishedTopic || task.topic, card: task.publishedCard, rating: task.publishedRating || scoreCard(task.publishedCard), publicationStatus: 'published', publishedAt: task.publishedAt }
     return wait({ task: publicTask })
   },
   async createTask(input: { draftText: string; topic: Topic }) {
     requireBusiness()
+    if (input.draftText.trim().length < 10) throw { status: 422, error: { code: 'VALIDATION_ERROR', message: 'Опишите задачу хотя бы в одном коротком предложении.' } }
     const timestamp = new Date().toISOString()
     const card = blankCard()
-    const task: OwnerTask = {
-      id: `task-${nextTask++}`, draftText: input.draftText, topic: input.topic, workingCard: card, confirmedCard: null,
+    const task: StoredTask = {
+      id: `task-${nextTask++}`, draftText: input.draftText.trim(), topic: input.topic, workingCard: card, confirmedCard: null,
       questions: [], answers: [], revision: 1, confirmedRevision: null, publicationStatus: 'draft', rating: scoreCard(card),
+      publishedCard: null, publishedRating: null, publishedRevision: null, aiResult: null, manualFields: [],
       publishedAt: null, createdAt: timestamp, updatedAt: timestamp,
     }
+    refresh(task)
     taskStore = [task, ...taskStore]
+    persist()
     return wait({ task })
   },
-  async patchTask(id: string, body: { revision: number; draftText?: string; topic?: Topic; cardPatch?: Partial<Card>; answers?: Answer[] }) {
+  async patchTask(id: string, body: { revision: number; draftText?: string; topic?: Topic; cardPatch?: Partial<Card>; answers?: Answer[]; manualFields?: string[] }) {
     requireBusiness()
     const task = requireTask(id)
-    if (task.revision !== body.revision) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Задача изменилась. Загрузите актуальную версию.' } }
+    requireRevision(task, body.revision)
     if (body.draftText !== undefined) task.draftText = body.draftText
     if (body.topic !== undefined) task.topic = body.topic
     if (body.cardPatch) task.workingCard = mergeCard(task.workingCard, body.cardPatch)
     if (body.answers !== undefined) task.answers = body.answers
+    if (body.manualFields !== undefined) task.manualFields = [...new Set([...(task.manualFields || []), ...body.manualFields])]
     task.revision += 1
     task.updatedAt = new Date().toISOString()
-    return wait({ task, previewRating: scoreCard(task.workingCard) })
+    refresh(task)
+    persist()
+    return wait({ task, previewRating: task.previewRating! })
   },
   async analyze(id: string, revision: number, mode: 'analyze' | 'compose') {
     requireBusiness()
     const task = requireTask(id)
-    if (task.revision !== revision) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Задача изменилась. Загрузите актуальную версию.' } }
-    const proposal = mergeCard(task.workingCard, {
-      title: task.workingCard.title || task.draftText.slice(0, 72) || 'Новая задача',
-      context: task.workingCard.context || task.draftText || null,
-      need: task.workingCard.need || task.draftText || null,
-    })
-    const questions = questionTemplates.map((item, index) => ({ id: `${id}-q${index + 1}`, field: item.field, text: item.text, sourceRevision: revision }))
-    const result: AiResult = { sourceRevision: revision, questions: mode === 'analyze' ? questions : [], proposal, warnings: [], mode: 'template' }
+    requireRevision(task, revision)
+    const result = templateResult(task, mode)
+    if (mode === 'analyze') {
+      const allQuestions = new Map(task.questions.map((question) => [question.id, question]))
+      for (const question of result.questions) allQuestions.set(question.id, question)
+      task.questions = [...allQuestions.values()]
+    }
+    task.aiResult = result
+    persist()
     return wait(result)
   },
   async confirm(id: string, revision: number) {
     requireBusiness()
     const task = requireTask(id)
-    if (task.revision !== revision) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Задача изменилась. Загрузите актуальную версию.' } }
+    requireRevision(task, revision)
     if (!task.workingCard.title || task.workingCard.title.trim().length < 3) throw { status: 422, error: { code: 'VALIDATION_ERROR', message: 'Название должно содержать не менее 3 символов.' } }
     task.confirmedCard = structuredClone(task.workingCard)
     task.confirmedRevision = task.revision
+    task.confirmedTopic = task.topic
     task.rating = scoreCard(task.confirmedCard)
     task.updatedAt = new Date().toISOString()
+    persist()
     return wait({ task, rating: task.rating })
   },
   async publish(id: string, revision: number) {
     requireBusiness()
     const task = requireTask(id)
-    if (task.revision !== revision || task.confirmedRevision !== revision) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Сначала подтвердите актуальную версию задачи.' } }
+    requireRevision(task, revision)
+    if (task.confirmedRevision !== revision || !task.confirmedCard) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Сначала подтвердите актуальную версию задачи.' } }
     task.publicationStatus = 'published'
-    task.publishedAt ||= new Date().toISOString()
+    task.publishedCard = structuredClone(task.confirmedCard)
+    task.publishedRating = structuredClone(task.rating)
+    task.publishedTopic = task.confirmedTopic || task.topic
+    task.publishedRevision = revision
+    task.publishedAt = new Date().toISOString()
+    task.updatedAt = task.publishedAt
+    refresh(task)
+    persist()
     return wait({ task })
   },
   async listApplications(taskId?: string) {
     let items = applicationStore
-    if (activeActor?.kind === 'business') {
-      requireBusiness()
+    if (activeActor.kind === 'business') {
       if (taskId) items = items.filter((item) => item.taskId === taskId)
       else items = items.filter((item) => taskStore.find((task) => task.id === item.taskId)?.publicationStatus === 'published')
     } else {
@@ -177,11 +332,9 @@ export const mockApi = {
     const task = requireTask(taskId)
     if (task.publicationStatus !== 'published') throw { status: 404, error: { code: 'NOT_FOUND', message: 'Задача недоступна для отклика.' } }
     if (applicationStore.some((item) => item.taskId === taskId && item.teamId === activeActor.id)) throw { status: 409, error: { code: 'DUPLICATE_APPLICATION', message: 'Ваша команда уже отправила отклик.' } }
-    const application: Application = {
-      ...input, id: `app-${nextApplication++}`, taskId, teamId: activeActor.id, teamName: activeActor.name,
-      status: 'pending', createdAt: new Date().toISOString(), decidedAt: null,
-    }
+    const application: Application = { ...input, id: `app-${nextApplication++}`, taskId, teamId: activeActor.id, teamName: activeActor.name, status: 'pending', createdAt: new Date().toISOString(), decidedAt: null }
     applicationStore = [application, ...applicationStore]
+    persist()
     return wait({ application })
   },
   async decideApplication(id: string, status: 'selected' | 'rejected') {
@@ -190,6 +343,7 @@ export const mockApi = {
     if (!application) throw { status: 404, error: { code: 'NOT_FOUND', message: 'Отклик не найден.' } }
     application.status = status
     application.decidedAt = new Date().toISOString()
+    persist()
     return wait({ application })
   },
 }

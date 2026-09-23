@@ -23,6 +23,8 @@ export type Answer = { questionId: string; value: string | null; skipped: boolea
 export type TaskSummary = {
   id: string; title: string; topic: Topic; rating: Rating; publicationStatus: 'draft' | 'published'
   publishedAt: string | null; applicationCount: number
+  need?: string | null; result?: string | null; dataAvailability?: Card['data']['availability']; deadline?: string | null
+  previewRating?: Rating; hasUnpublishedChanges?: boolean; updatedAt?: string; pendingApplicationCount?: number
 }
 
 export type OwnerTask = {
@@ -30,6 +32,8 @@ export type OwnerTask = {
   questions: Question[]; answers: Answer[]; revision: number; confirmedRevision: number | null
   publicationStatus: 'draft' | 'published'; rating: Rating; publishedAt: string | null
   createdAt: string; updatedAt: string
+  previewRating?: Rating; publishedRevision?: number | null; publishedCard?: Card | null
+  hasUnpublishedChanges?: boolean; aiResult?: AiResult | null; manualFields?: string[]
 }
 
 export type PublicTask = { id: string; topic: Topic; card: Card; rating: Rating; publicationStatus: 'published'; publishedAt: string | null }
@@ -38,4 +42,5 @@ export type Application = {
   prototypeUrl: string | null; status: Status; createdAt: string; decidedAt: string | null
 }
 export type Actor = { id: string; kind: Role; name: string; profile: string | Record<string, unknown> }
-export type AiResult = { sourceRevision: number; questions: Question[]; proposal: Card; warnings: string[]; mode: 'live' | 'cached' | 'template' }
+export type Evidence = { field: string; sourceId: string; quote: string }
+export type AiResult = { sourceRevision: number; questions: Question[]; proposal: Card; warnings: string[]; mode: 'live' | 'cached' | 'template'; evidence?: Evidence[] }

@@ -22,14 +22,14 @@ export const api = {
   selectSession: (actorId: string) => useMock ? mockApi.selectSession(actorId) : request<{ actor: Actor }>('/demo/session', json({ actorId })),
   listTasks: (params: { scope: 'mine' | 'catalog'; topic?: Topic; level?: Level }) => {
     if (useMock) return mockApi.listTasks(params)
-    const query = new URLSearchParams({ scope: params.scope })
+    const query = new URLSearchParams({ scope: params.scope, limit: '100' })
     if (params.topic) query.set('topic', params.topic)
     if (params.level) query.set('level', params.level)
     return request<{ items: TaskSummary[]; total: number }>(`/tasks?${query}`)
   },
   getTask: (id: string) => useMock ? mockApi.getTask(id) : request<{ task: OwnerTask | PublicTask }>(`/tasks/${id}`),
   createTask: (draftText: string, topic: Topic) => useMock ? mockApi.createTask({ draftText, topic }) : request<{ task: OwnerTask }>('/tasks', json({ draftText, topic })),
-  patchTask: (id: string, body: { revision: number; draftText?: string; topic?: Topic; cardPatch?: Partial<Card>; answers?: Answer[] }) => useMock
+  patchTask: (id: string, body: { revision: number; draftText?: string; topic?: Topic; cardPatch?: Partial<Card>; answers?: Answer[]; manualFields?: string[] }) => useMock
     ? mockApi.patchTask(id, body)
     : request<{ task: OwnerTask; previewRating: Rating }>(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }),
   analyze: (id: string, revision: number, mode: 'analyze' | 'compose') => useMock
