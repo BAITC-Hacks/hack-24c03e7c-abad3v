@@ -98,6 +98,17 @@
 .task-key-facts dt { margin-bottom: 5px; color: var(--muted); font-size: 13px; }
 .task-key-facts dd { margin: 0; color: var(--ink); font-size: 16px; }
 .task-key-facts dd.fact-extra { margin-top: 5px; color: var(--muted); font-size: 14px; }
+.public-rating-breakdown { margin-top: 23px; padding-top: 19px; border-top: 1px solid var(--line); }
+.public-rating-breakdown > summary { color: var(--accent); cursor: pointer; font-size: 14px; line-height: 1.6; }
+.public-rating-breakdown > summary strong { margin-left: 6px; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.public-rating-breakdown > p { margin: 13px 0 16px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.public-rating-sections { display: grid; gap: 14px; }
+.public-rating-sections > section { padding-top: 14px; border-top: 1px solid var(--line); }
+.public-rating-line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.public-rating-line h3 { margin: 0; color: var(--ink); font-size: 14px; font-weight: 600; }
+.public-rating-line > span { flex-shrink: 0; color: var(--ink); font-size: 13px; }
+.public-rating-sections p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.public-rating-sections ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 19px; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .task-apply-panel > svg { margin-bottom: 12px; color: var(--accent); }
 .task-apply-panel p, .application-sent-panel p { margin: 0 0 20px; color: var(--muted); font-size: 16px; line-height: 1.65; }
 .task-apply-panel .button, .application-sent-panel .button { width: 100%; }
