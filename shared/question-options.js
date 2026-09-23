@@ -219,7 +219,7 @@ function inventedContact(value, context) {
   const names = value.match(/[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+/gu) || [];
   if (names.some((name) => !contextText(context).includes(name))) return true;
   const actors = [...value.matchAll(/(?:^|[.!?]\s+)([А-ЯЁ][а-яё]+)\s+(?:ответит|проверит|сможет|будет|провед[её]т)/gu)].map((match) => match[1]);
-  const roles = /^(?:Преподаватель|Педагог|Методист|Библиотекарь|Наставник|Заказчик|Координатор|Представитель|Ответственный|Специалист|Сотрудник|Руководитель|Администратор|Заведующий|Эксперт|Проверяющий|Команда)$/u;
+  const roles = /^(?:Преподаватель|Преподавательница|Педагог|Методист|Методистка|Библиотекарь|Наставник|Наставница|Заказчик|Координатор|Представитель|Представительница|Ответственный|Ответственная|Специалист|Специалистка|Сотрудник|Сотрудница|Руководитель|Руководительница|Администратор|Заведующий|Заведующая|Эксперт|Проверяющий|Проверяющая|Учитель|Учительница|Команда)$/u;
   return actors.some((actor) => !roles.test(actor) && !contextText(context).includes(actor)) || /завтра|послезавтра/iu.test(value);
 }
 
@@ -233,7 +233,7 @@ export function normalizeQuestionOptions(question, taskContext = {}, candidateOp
     const label = clean(candidate.label), originalValue = clean(candidate.value);
     const unknown = contact && originalValue && (!hasMeaningfulValue(originalValue) || unknownContact.test(originalValue));
     const value = unknown ? 'Не знаю.' : originalValue;
-    if ((!unknown && (!hasMeaningfulValue(label) || !hasMeaningfulValue(value))) || !label || label.length > 80 || originalValue.length > 300 || specificFacts.test(`${label} ${originalValue}`)) return;
+    if ((!unknown && !hasMeaningfulValue(value)) || !label || label.length > 80 || originalValue.length > 300 || specificFacts.test(`${label} ${originalValue}`)) return;
     if (contact && inventedContact(`${label}. ${originalValue}`, taskContext)) return;
     if (question.field === 'success.metric' && vagueMetric.test(value) && !measuredMetric.test(value)) return;
     const key = (text) => text.normalize('NFKC').toLowerCase().replaceAll('ё', 'е').replace(/[\s.!?…]+$/gu, '');
@@ -244,6 +244,8 @@ export function normalizeQuestionOptions(question, taskContext = {}, candidateOp
   if (Array.isArray(candidateOptions)) {
     for (const candidate of candidateOptions) { append(candidate); if (normalized.length === 4) break; }
   }
+  // Two useful alternatives are enough; padding them can repeat their meaning.
+  if (normalized.length >= 2) return normalized;
   for (const candidate of fallback) { if (normalized.length >= 3) break; append(candidate); }
   return normalized;
 }

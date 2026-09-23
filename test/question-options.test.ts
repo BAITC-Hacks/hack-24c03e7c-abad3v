@@ -169,3 +169,33 @@ test('local refinements suggest checks and edge cases without replacing known fi
   assert.deepEqual(normalizeQuestionOptions(refined, {}, [candidate]), [candidate], 'do not append unrelated generic formats to a model refinement')
   assert.deepEqual(getQuestionOptions({ field: 'users', refines: true }), [])
 })
+
+test('two useful alternatives are retained without padding with a synonymous default', () => {
+  const candidates = [
+    { label: 'Совпадение', value: 'Показанные свободные слоты совпадают с согласованными контрольными примерами.' },
+    { label: 'Поиск возможен', value: 'Студент может найти свободную аудиторию в предусмотренных сценариях проверки.' },
+    { label: 'Пока не знаю', value: 'Пока не знаю' },
+  ]
+  const question = { field: 'success.target' }, task = { draftText: 'Поиск свободных аудиторий.' }
+  assert.deepEqual(normalizeQuestionOptions(question, task, candidates), candidates.slice(0, 2))
+  assert.deepEqual(normalizeQuestionOptions(question, task, candidates.slice(0, 2)), candidates.slice(0, 2))
+})
+
+test('an uncertainty label can describe a meaningful interface behavior', () => {
+  const candidate = { label: 'Неизвестно', value: 'Показывать статус «Доступность неизвестна».' }
+  const question = { field: 'result.scope', refines: true, origin: 'live' as const }
+  assert.deepEqual(normalizeQuestionOptions(question, {}, [candidate]), [candidate])
+  assert.deepEqual(normalizeQuestionOptions(question, {}, [{ label: '  ', value: candidate.value }]), [])
+  assert.deepEqual(normalizeQuestionOptions(question, {}, [{ label: 'Неизвестно', value: 'Не знаю.' }]), [])
+})
+
+test('common feminine roles survive while unmentioned personal names are still rejected', () => {
+  const question = { field: 'contact.feedback', refines: true, origin: 'live' as const }
+  for (const role of ['Заведующая', 'Ответственная', 'Проверяющая', 'Учитель', 'Учительница', 'Сотрудница']) {
+    const candidate = { label: role, value: `${role} сможет проверять прототип и давать обратную связь.` }
+    assert.deepEqual(normalizeQuestionOptions(question, {}, [candidate]), [candidate], role)
+  }
+  for (const name of ['Иван', 'Дмитрий', 'Анна', 'Иван Петров']) {
+    assert.deepEqual(normalizeQuestionOptions(question, {}, [{ label: 'Проверяющий', value: `${name} сможет проверять прототип.` }]), [], name)
+  }
+})
