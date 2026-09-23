@@ -73,5 +73,5 @@ test('удалённый источник очищает прежнее пред
   assert.equal(next.proposal.context, null);
   assert.equal(next.proposal.title, 'Помощник студентам');
   assert.equal(next.proposal.result.scope, first.proposal.result.scope);
-  assert.equal(next.evidence.find((item) => item.field === 'result.scope').sourceId, 'card:result.scope');
+  assert.equal(next.evidence.some((item) => item.field === 'result.scope'), false, 'manual fields must not be relabelled as AI output');
 });

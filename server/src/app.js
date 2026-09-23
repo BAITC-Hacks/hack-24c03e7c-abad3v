@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { z, ZodError } from 'zod';
 import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, getField, setField, mergeCard, scoreCard, validatePublishable } from './card.js';
 import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, questionHistoryFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
-import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, templateResult } from './ai.js';
+import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, prepareLiveRequest, templateResult } from './ai.js';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -229,69 +229,94 @@ function limitAi(actorId) {
   allAiTimes.push(timestamp);
 }
 
+export function analysisHash(task, mode) {
+  const answerQuestions = task.questionHistory.filter((question) => task.answers.some((answer) => answer.questionId === question.id));
+  const protectedFields = [...new Set([...(task.manualFields ?? []), ...(task.protectedFields ?? [])])];
+  return createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, protectedFields, answers: task.answers, answerQuestions, ...(mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
+}
+
 app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   const actor = requireActor(req, 'business');
   const body = parse(revisionBody.extend({ mode: z.enum(['analyze', 'compose']) }), jsonFields(req));
   const row = ownerTask(req, req.params.id);
   checkRevision(row, body.revision);
-  const task = taskFromRow(row);
-  const answerQuestions = task.questionHistory.filter((question) => task.answers.some((answer) => answer.questionId === question.id));
-  const hash = createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode: body.mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, manualFields: task.manualFields, answers: task.answers, answerQuestions, ...(body.mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
+  const task = { ...taskFromRow(row), protectedFields: decode(row.protected_fields_json) };
+  const hash = analysisHash(task, body.mode);
   const cache = decode(row.analysis_cache_json);
-  if (cache[body.mode]?.hash === hash) {
-    const result = { ...cache[body.mode].result, sourceRevision: row.revision, mode: cache[body.mode].result.mode === 'template' ? 'template' : 'cached' };
-    db.prepare('UPDATE tasks SET ai_result_json=? WHERE id=?').run(encode(result), row.id);
-    return res.json(result);
-  }
-  if (process.env.AI_MODE !== 'template' && process.env.OPENAI_API_KEY) limitAi(actor.id);
+  const candidate = cache[body.mode]?.hash === hash ? cache[body.mode] : null;
+  const cached = candidate && (process.env.AI_MODE !== 'template' || candidate.originMode === 'template') ? candidate : null;
   let mode = 'template';
   let result;
-  if (process.env.AI_MODE !== 'template' && process.env.OPENAI_API_KEY) {
-    const total = db.prepare("SELECT COALESCE(SUM(COALESCE(actual_usd,reserved_usd)),0) AS usd FROM ai_usage WHERE provider='openai'").get().usd;
-    const cap = Number(process.env.AI_BUDGET_CAP_USD || 15);
-    const model = process.env.OPENAI_MODEL || 'gpt-6-sol';
-    const price = MODEL_PRICES[model];
-    const reserve = price ? (8000 * price.input + (body.mode === 'analyze' ? 1200 : 1800) * price.output) / 1000000 : Infinity;
-    if (Number.isFinite(cap) && total + reserve <= cap) {
-      const id = randomUUID();
-      const started = Date.now();
-      db.prepare('INSERT INTO ai_usage (id,task_id,provider,model,reserved_usd,duration_ms,status,created_at) VALUES (?,?,?,?,?,?,?,?)')
-        .run(id, row.id, 'openai', model, reserve, 0, 'reserved', now());
+  let generatedAt;
+  const fallbackWarnings = [];
+  if (cached) {
+    result = cached.result;
+    generatedAt = cached.generatedAt;
+    mode = cached.originMode === 'template' ? 'template' : 'cached';
+  } else {
+    if (process.env.AI_MODE !== 'template' && process.env.OPENAI_API_KEY) {
+      limitAi(actor.id);
+      let prepared;
       try {
-        const response = await liveResult(task, body.mode);
-        result = response.result;
-        mode = 'live';
-        const inputTokens = response.usage.inputTokens;
-        const outputTokens = response.usage.outputTokens;
-        const actual = inputTokens === null || outputTokens === null ? null : (inputTokens * price.input + outputTokens * price.output) / 1000000;
-        db.prepare('UPDATE ai_usage SET request_id=?,input_tokens=?,output_tokens=?,actual_usd=?,duration_ms=?,status=? WHERE id=?')
-          .run(response.usage.requestId, inputTokens, outputTokens, actual, response.usage.durationMs, actual === null ? 'unknown' : 'success', id);
+        prepared = prepareLiveRequest(task, body.mode);
       } catch (error) {
-        db.prepare('UPDATE ai_usage SET duration_ms=?,status=? WHERE id=?').run(Date.now() - started, 'unknown', id);
-        console.warn('AI fallback:', error?.constructor?.name || 'Error');
+        if (error.code !== 'AI_INPUT_TOO_LONG') throw error;
+        fallbackWarnings.push('Материалов слишком много для одного AI-запроса. Использован шаблонный режим; сохранённый текст и ответы не сокращены.');
+      }
+      const total = db.prepare("SELECT COALESCE(SUM(COALESCE(actual_usd,reserved_usd)),0) AS usd FROM ai_usage WHERE provider='openai'").get().usd;
+      const cap = Number(process.env.AI_BUDGET_CAP_USD || 15);
+      const model = process.env.OPENAI_MODEL || 'gpt-6-sol';
+      const price = MODEL_PRICES[model];
+      const reserve = price && prepared ? (prepared.inputTokenUpperBound * price.input + prepared.maxOutputTokens * price.output) / 1000000 : Infinity;
+      if (prepared && Number.isFinite(cap) && total + reserve <= cap) {
+        const id = randomUUID();
+        const started = Date.now();
+        db.prepare('INSERT INTO ai_usage (id,task_id,provider,model,reserved_usd,duration_ms,status,created_at) VALUES (?,?,?,?,?,?,?,?)')
+          .run(id, row.id, 'openai', model, reserve, 0, 'reserved', now());
+        try {
+          const response = await liveResult(task, body.mode, { prepared });
+          result = response.result;
+          mode = 'live';
+          const inputTokens = response.usage.inputTokens;
+          const outputTokens = response.usage.outputTokens;
+          const actual = inputTokens === null || outputTokens === null ? null : (inputTokens * price.input + outputTokens * price.output) / 1000000;
+          db.prepare('UPDATE ai_usage SET request_id=?,input_tokens=?,output_tokens=?,actual_usd=?,duration_ms=?,status=? WHERE id=?')
+            .run(response.usage.requestId, inputTokens, outputTokens, actual, response.usage.durationMs, actual === null ? 'unknown' : 'success', id);
+        } catch (error) {
+          db.prepare('UPDATE ai_usage SET duration_ms=?,status=? WHERE id=?').run(Date.now() - started, 'unknown', id);
+          fallbackWarnings.push('AI не вернул подходящий результат. Использован шаблонный режим; проверьте предложенные поля.');
+          console.warn('AI fallback:', error?.constructor?.name || 'Error');
+        }
+      } else if (prepared) {
+        fallbackWarnings.push('AI-запрос недоступен при текущих настройках модели или лимите бюджета. Использован шаблонный режим.');
       }
     }
   }
   if (!result) result = templateResult(task, body.mode);
+  generatedAt ??= now();
   const latest = getTask(row.id);
   if (latest.revision !== row.revision) fail(409, 'REVISION_CONFLICT', 'Задача изменилась во время AI-запроса');
+  const history = questionHistoryFromRow(latest);
   const questions = body.mode === 'analyze' ? result.questions.map((q) => {
-    const previous = task.questionHistory.find((item) => item.field === q.field && item.text === q.text)
-      ?? task.questionHistory.find((item) => item.field === q.field);
-    return { ...q, id: previous?.id ?? `q:${q.field}`, sourceRevision: previous?.sourceRevision ?? row.revision };
+    const existing = history.find((item) => item.field === q.field && item.text === q.text) ?? history.find((item) => item.field === q.field);
+    const question = { ...q, id: existing?.id ?? (mode === 'cached' ? q.id : `q:${q.field}`), sourceRevision: existing?.sourceRevision ?? row.revision };
+    const index = history.findIndex((item) => item.id === question.id);
+    if (index < 0) history.push(question);
+    else history[index] = question;
+    return question;
   }) : task.questions;
-  // Keep source questions for saved answers even when a later analysis asks about new gaps.
-  const allQuestions = [...task.questionHistory];
-  for (const question of questions) {
-    const index = allQuestions.findIndex((previous) => previous.id === question.id);
-    if (index < 0) allQuestions.push(question);
-    else allQuestions[index] = question;
-  }
-  const payload = { questions, proposal: result.proposal, warnings: result.warnings, evidence: result.evidence, sourceRevision: row.revision, mode };
-  cache[body.mode] = { hash, result: payload };
-  db.prepare('UPDATE tasks SET questions_json=?,question_history_json=?,analysis_cache_json=?,ai_result_json=? WHERE id=?')
-    .run(encode(allQuestions), encode(allQuestions), encode(cache), encode(payload), row.id);
-  res.json(payload);
+  const payload = { questions, proposal: result.proposal, warnings: [...result.warnings, ...fallbackWarnings], evidence: result.evidence };
+  const lastAnalysis = { ...payload, operation: body.mode, sourceRevision: row.revision, generatedAt, mode: mode === 'cached' ? 'live' : mode };
+  transaction(() => {
+    if (body.mode === 'analyze') db.prepare('UPDATE tasks SET questions_json=?,question_history_json=? WHERE id=?').run(encode(history), encode(history), row.id);
+    if (mode !== 'cached') {
+      const latestCache = decode(latest.analysis_cache_json);
+      latestCache[body.mode] = { hash, result: payload, generatedAt, originMode: mode };
+      db.prepare('UPDATE tasks SET analysis_cache_json=? WHERE id=?').run(encode(latestCache), row.id);
+    }
+    db.prepare('UPDATE tasks SET last_analysis_json=?,ai_result_json=? WHERE id=?').run(encode(lastAnalysis), encode(lastAnalysis), row.id);
+  });
+  res.json({ ...lastAnalysis, stale: false, mode });
 }));
 
 const applicationBody = z.object({

@@ -1,4 +1,5 @@
-import { CARD_PATHS, getField, scoreCard, setField } from './card.js';
+import { getField, scoreCard, setField } from './card.js';
+import { latestAnswerSources, latestAnswerStates } from './sources.js';
 import { addFact, canSuggest, protectedPaths, startingProposal } from './proposal.js';
 
 const questionText = {
@@ -96,35 +97,53 @@ const draftRules = {
   'contact.feedback': /(?:обратн[\p{L}]* связь|прототип проверят|прототип проверит|результат проверит)/iu,
 };
 
+function sourceSentences(raw) {
+  const result = [];
+  let start = 0;
+  const add = (end) => {
+    const text = normalize(raw.slice(start, end));
+    if (!unknown(text)) result.push({ text, start, end });
+  };
+  for (const match of raw.matchAll(/(?<=[.!?])\s+|\r?\n/gu)) {
+    add(match.index);
+    start = match.index + match[0].length;
+  }
+  add(raw.length);
+  return result;
+}
+
 export function templateResult(task, mode) {
   const result = startingProposal(task);
   const proposal = result.proposal;
   const protectedFields = protectedPaths(task);
-  const unresolved = new Set();
+  const answerStates = latestAnswerStates(task);
+  const unresolved = new Set(answerStates.filter((answer) => answer.skipped || !answer.text?.trim()).map((answer) => answer.field));
   const warnings = [];
   const warn = (message) => { if (!warnings.includes(message)) warnings.push(message); };
+  const sourceText = (raw) => {
+    if (typeof raw !== 'string') return '';
+    if (raw.length > 6000) warn('Источник длиннее 6000 символов; использовано начало текста, проверьте пропущенные сведения.');
+    return raw.slice(0, 6000);
+  };
   const mayFill = (field) => canSuggest(task, proposal, field) || (field === 'title' && proposal.title === 'Новая задача' && !protectedFields.has(field));
-  function fill(field, value, sourceId = 'draft', quote = task.draftText) {
+  function fill(field, value, source) {
     if (!mayFill(field) || unknown(value)) return;
     const text = normalize(value);
     const max = field === 'title' ? 120 : 1000;
     if (text.length > max) warn(`Поле ${field} сокращено до ${max} символов; проверьте формулировку.`);
-    addFact(task, result, field, text.slice(0, max).trim(), sourceId, quote);
+    addFact(task, result, field, text.slice(0, max).trim(), source.sourceId, source.quote);
   }
 
   // Latest saved answers take precedence, including an explicit unknown answer.
-  const questions = new Map([...(task.questionHistory ?? []), ...(task.questions ?? [])].map((question) => [question.id, question]));
-  const answeredFields = new Set();
+  const answerSources = latestAnswerSources(task);
+  const answeredFields = new Set(answerStates.map(({ field }) => field));
   let dateFromDeadlineAnswer = null;
   let targetFromMetricAnswer = null;
-  for (const answer of [...(task.answers ?? [])].reverse()) {
-    const field = questions.get(answer.questionId)?.field;
-    if (!CARD_PATHS.includes(field) || answeredFields.has(field)) continue;
-    answeredFields.add(field);
+  for (const answer of answerSources) {
+    const { field } = answer;
     if (!mayFill(field)) continue;
-    if (answer.skipped || !normalize(answer.value)) { unresolved.add(field); continue; }
-    const value = normalize(answer.value);
-    const sourceId = `answer:${answer.questionId}`;
+    const source = { sourceId: answer.id, quote: sourceText(answer.text) };
+    const value = normalize(source.quote);
     if (unknown(value)) {
       unresolved.add(field);
       if (enumFields.has(field)) warn(`Ответ для ${field} не определён; поле оставлено пустым.`);
@@ -136,10 +155,10 @@ export function templateResult(task, mode) {
         unresolved.add(field);
         warn(`Не удалось однозначно определить ${field} из ответа; уточните поле вручную.`);
       } else {
-        fill(field, parsed, sourceId, answer.value);
+        fill(field, parsed, source);
         if (field === 'constraints.deadlineMode' && parsed === 'fixed') {
           const date = parseDate(value);
-          if (date) dateFromDeadlineAnswer = { value: date, sourceId, quote: answer.value };
+          if (date) dateFromDeadlineAnswer = { value: date, source };
         }
         if (field === 'constraints.deadlineMode' && parsed === 'flexible' && !protectedFields.has('constraints.deadlineDate')) {
           setField(proposal, 'constraints.deadlineDate', null);
@@ -147,45 +166,49 @@ export function templateResult(task, mode) {
         }
       }
     } else {
-      fill(field, value, sourceId, answer.value);
-      if (field === 'success.metric' && /\d|минимум|не менее|не больше|как минимум|половин|все |из (пяти|десяти|тр[её]х)/iu.test(value)) targetFromMetricAnswer = { value, sourceId, quote: answer.value };
+      fill(field, value, source);
+      if (field === 'success.metric' && /\d|минимум|не менее|не больше|как минимум|половин|все |из (пяти|десяти|тр[её]х)/iu.test(value)) targetFromMetricAnswer = { value, source };
     }
   }
-  if (dateFromDeadlineAnswer && !answeredFields.has('constraints.deadlineDate')) fill('constraints.deadlineDate', dateFromDeadlineAnswer.value, dateFromDeadlineAnswer.sourceId, dateFromDeadlineAnswer.quote);
-  if (targetFromMetricAnswer && !answeredFields.has('success.target')) fill('success.target', targetFromMetricAnswer.value, targetFromMetricAnswer.sourceId, targetFromMetricAnswer.quote);
+  if (dateFromDeadlineAnswer && !answeredFields.has('constraints.deadlineDate')) fill('constraints.deadlineDate', dateFromDeadlineAnswer.value, dateFromDeadlineAnswer.source);
+  if (targetFromMetricAnswer && !answeredFields.has('success.target')) fill('success.target', targetFromMetricAnswer.value, targetFromMetricAnswer.source);
 
-  const draft = normalize(task.draftText);
-  const sentences = typeof task.draftText === 'string'
-    ? task.draftText.split(/(?<=[.!?])\s+|\r?\n/u).map((sentence) => sentence.trim()).filter((sentence) => !unknown(sentence)) : [];
+  const rawDraft = sourceText(task.draftText);
+  const draft = normalize(rawDraft);
+  const sentences = sourceSentences(rawDraft);
+  const draftEvidence = (items) => ({ sourceId: 'draft', quote: rawDraft.slice(items[0].start, items.at(-1).end) });
   if (sentences.length && !unresolved.has('title') && !answeredFields.has('title')) {
-    const classroom = sentences.find((sentence) => /аудитори/iu.test(sentence) && /свободн|найти|наход|поиск/iu.test(sentence));
-    const title = classroom ? 'Поиск свободных аудиторий' : sentences[0].replace(/^(?:нам |мне )?(?:нуж(?:но|ен|на|ны)|хотим|хочу)\s+/iu, '').replace(/[.!?]$/, '');
-    fill('title', classroom ? title : title.charAt(0).toUpperCase() + title.slice(1), 'draft', classroom ?? sentences[0]);
+    const classroom = sentences.find(({ text }) => /аудитори/iu.test(text) && /свободн|найти|наход|поиск/iu.test(text));
+    const title = classroom ? 'Поиск свободных аудиторий' : sentences[0].text.replace(/^(?:нам |мне )?(?:нуж(?:но|ен|на|ны)|хотим|хочу)\s+/iu, '').replace(/[.!?]$/, '');
+    fill('title', classroom ? title : title.charAt(0).toUpperCase() + title.slice(1), draftEvidence([classroom ?? sentences[0]]));
   }
   for (const [field, pattern] of Object.entries(draftRules)) {
     if (unresolved.has(field) || answeredFields.has(field)) continue;
-    const candidates = sentences.filter((sentence) => pattern.test(sentence));
-    if (field === 'users' && !candidates.length) candidates.push(...sentences.filter((sentence) => /студент|выпускник|методист|учащ/iu.test(sentence)));
+    const candidates = sentences.filter(({ text }) => pattern.test(text));
+    if (field === 'users' && !candidates.length) candidates.push(...sentences.filter(({ text }) => /студент|выпускник|методист|учащ/iu.test(text)));
     if (candidates.length) {
-      const text = field === 'result.scope' ? candidates.join(' ') : field === 'result.artifact' ? candidates[0].match(/веб[- ]прототип/iu)?.[0] ?? candidates[0] : candidates[0];
-      fill(field, text, 'draft', field === 'result.scope' ? task.draftText : candidates[0]);
+      const selected = field === 'result.scope' ? candidates : [candidates[0]];
+      const text = field === 'result.artifact' ? selected[0].text.match(/веб[- ]прототип/iu)?.[0] ?? selected[0].text : selected.map(({ text }) => text).join(' ');
+      fill(field, text, draftEvidence(selected));
     }
   }
   if (draft && !unknown(draft)) {
     if (!unresolved.has('data.availability') && !answeredFields.has('data.availability') && mayFill('data.availability')) {
-      const dataText = sentences.filter((sentence) => /(?:данн|материал|пример)/iu.test(sentence)).join(' ');
+      const dataSentences = sentences.filter(({ text }) => /(?:данн|материал|пример)/iu.test(text));
+      const dataText = dataSentences.map(({ text }) => text).join(' ');
       const availability = parseAvailability(dataText);
-      if (availability) fill('data.availability', availability);
+      if (availability) fill('data.availability', availability, draftEvidence(dataSentences));
       else if (dataText) warn('Доступность данных не указана однозначно в описании; уточните data.availability.');
     }
-    const deadlineText = sentences.filter((sentence) => /(?:срок|дедлайн|нужен к|нужна к|нужно к|готов к|готова к|до \d|deadline)/iu.test(sentence)).join(' ');
+    const deadlineSentences = sentences.filter(({ text }) => /(?:срок|дедлайн|нужен к|нужна к|нужно к|готов к|готова к|до \d|deadline)/iu.test(text));
+    const deadlineText = deadlineSentences.map(({ text }) => text).join(' ');
     if (deadlineText) {
       const deadline = parseDeadline(deadlineText);
-      if (!unresolved.has('constraints.deadlineMode') && !answeredFields.has('constraints.deadlineMode') && deadline) fill('constraints.deadlineMode', deadline);
+      if (!unresolved.has('constraints.deadlineMode') && !answeredFields.has('constraints.deadlineMode') && deadline) fill('constraints.deadlineMode', deadline, draftEvidence(deadlineSentences));
       else if (!deadline && mayFill('constraints.deadlineMode') && !unresolved.has('constraints.deadlineMode')) warn('Тип срока не указан однозначно в описании; уточните constraints.deadlineMode.');
       if (!unresolved.has('constraints.deadlineDate') && !answeredFields.has('constraints.deadlineDate') && getField(proposal, 'constraints.deadlineMode') === 'fixed') {
         const date = parseDate(deadlineText);
-        if (date) fill('constraints.deadlineDate', date);
+        if (date) fill('constraints.deadlineDate', date, draftEvidence(deadlineSentences));
       }
     }
   }

@@ -91,6 +91,7 @@ for (const [name, definition] of Object.entries({
   published_rating_json: 'TEXT',
   published_score: 'INTEGER NOT NULL DEFAULT 0',
   ai_result_json: 'TEXT',
+  last_analysis_json: 'TEXT',
   manual_fields_json: "TEXT NOT NULL DEFAULT '[]'",
   question_history_json: "TEXT NOT NULL DEFAULT '[]'",
   protected_fields_json: "TEXT NOT NULL DEFAULT '[]'",
@@ -103,6 +104,8 @@ for (const row of db.prepare("SELECT * FROM tasks WHERE publication_status='publ
     .run(row.confirmed_card_json, row.confirmed_topic, row.confirmed_revision, JSON.stringify(rating), rating.score, row.id);
 }
 db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_public_snapshot ON tasks(publication_status,published_score DESC,published_at DESC)');
+db.exec('UPDATE tasks SET last_analysis_json=ai_result_json WHERE last_analysis_json IS NULL AND ai_result_json IS NOT NULL');
+db.exec('UPDATE tasks SET ai_result_json=last_analysis_json WHERE ai_result_json IS NULL AND last_analysis_json IS NOT NULL');
 
 export const now = () => new Date().toISOString();
 export const encode = (value) => JSON.stringify(value);
@@ -132,6 +135,8 @@ export function questionHistoryFromRow(row) {
 
 export function taskFromRow(row) {
   if (!row) return null;
+  const savedAnalysis = decode(row.last_analysis_json) ?? decode(row.ai_result_json);
+  const lastAnalysis = savedAnalysis ? { ...savedAnalysis, stale: savedAnalysis.sourceRevision !== row.revision } : null;
   return {
     id: row.id,
     draftText: row.draft_text,
@@ -142,7 +147,8 @@ export function taskFromRow(row) {
     publishedRevision: row.published_revision,
     hasUnpublishedChanges: row.publication_status === 'published' && row.published_revision !== row.revision,
     previewRating: scoreCard(decode(row.working_card_json)),
-    aiResult: decode(row.ai_result_json),
+    aiResult: lastAnalysis,
+    lastAnalysis,
     manualFields: [...new Set([...decode(row.manual_fields_json), ...decode(row.protected_fields_json)])],
     questions: decode(row.questions_json),
     questionHistory: questionHistoryFromRow(row),

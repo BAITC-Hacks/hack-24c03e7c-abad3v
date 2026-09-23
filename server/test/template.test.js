@@ -124,3 +124,109 @@ test('direct date answers take precedence over a date mentioned in another answe
   source.answers[0].value = '2026-11-01';
   assert.equal(templateResult(source, 'compose').proposal.constraints.deadlineDate, '2026-11-01');
 });
+
+test('both modes return exact raw draft evidence despite whitespace normalization', () => {
+  const rawDraft = '\n  Студентам   сложно находить аудитории.\r\nНужен   сайт для студентов.\nДанные   уже доступны из CSV.';
+  for (const mode of ['analyze', 'compose']) {
+    const result = templateResult(task({ draftText: rawDraft }), mode);
+    assert.equal(result.proposal.context, 'Студентам сложно находить аудитории.');
+    const context = result.evidence.find(({ field }) => field === 'context');
+    assert.deepEqual(context, { field: 'context', sourceId: 'draft', quote: '  Студентам   сложно находить аудитории.' });
+    const availability = result.evidence.find(({ field }) => field === 'data.availability');
+    assert.equal(result.proposal.data.availability, 'available');
+    assert.equal(availability.quote, 'Данные   уже доступны из CSV.');
+    for (const item of result.evidence) {
+      assert.equal(item.sourceId, 'draft');
+      assert.ok(rawDraft.includes(item.quote));
+      assert.ok(item.quote.length <= 6000);
+    }
+    assert.equal(new Set(result.evidence.map(({ field }) => field)).size, result.evidence.length);
+  }
+});
+
+test('merged scope cites a contiguous raw span covering every selected sentence', () => {
+  const rawDraft = 'Первая версия включает поиск.\nСвязь через учебный отдел.\r\nИз первого прототипа нужно исключить регистрацию.';
+  const result = templateResult(task({ draftText: rawDraft }), 'compose');
+  assert.equal(result.proposal.result.scope, 'Первая версия включает поиск. Из первого прототипа нужно исключить регистрацию.');
+  assert.deepEqual(result.evidence.find(({ field }) => field === 'result.scope'), {
+    field: 'result.scope', sourceId: 'draft', quote: rawDraft,
+  });
+});
+
+test('answer evidence retains its exact source and overrides matching draft facts', () => {
+  const rawAnswer = '  Проверим время\n  поиска по пяти сценариям.  ';
+  const source = task({
+    draftText: 'Показатель: число регистраций. Данные уже доступны из CSV.',
+    questionHistory: [{ id: 'archived-metric', field: 'success.metric' }],
+    answers: [{ questionId: 'archived-metric', value: rawAnswer }],
+  });
+  const result = templateResult(source, 'analyze');
+  assert.equal(result.proposal.success.metric, 'Проверим время поиска по пяти сценариям.');
+  assert.deepEqual(result.evidence.find(({ field }) => field === 'success.metric'), {
+    field: 'success.metric', sourceId: 'answer:archived-metric', quote: rawAnswer,
+  });
+  assert.equal(result.evidence.filter(({ field }) => field === 'success.metric').length, 1);
+});
+
+test('derived enum and date values cite the raw answer that supplied them', () => {
+  const source = task({
+    questions: [{ id: 'availability', field: 'data.availability' }, { id: 'deadline', field: 'constraints.deadlineMode' }],
+    answers: [{ questionId: 'availability', value: ' Данные\n уже доступны. ' }, { questionId: 'deadline', value: 'Нужен   к 12.10.2026' }],
+  });
+  const result = templateResult(source, 'compose');
+  assert.equal(result.proposal.data.availability, 'available');
+  assert.equal(result.proposal.constraints.deadlineMode, 'fixed');
+  assert.equal(result.proposal.constraints.deadlineDate, '2026-10-12');
+  for (const field of ['constraints.deadlineMode', 'constraints.deadlineDate']) {
+    assert.deepEqual(result.evidence.find((item) => item.field === field), {
+      field, sourceId: 'answer:deadline', quote: source.answers[1].value,
+    });
+  }
+  assert.equal(result.evidence.find(({ field }) => field === 'data.availability').quote, source.answers[0].value);
+});
+
+test('saved, protected, skipped and unknown fields get no generated provenance', () => {
+  const source = task({
+    draftText: 'Нужен сайт для студентов. Сейчас сведения ищут вручную. Показатель: время поиска.',
+    workingCard: mergeCard(emptyCard(), { title: 'Ручное название', users: 'Ручная группа' }),
+    protectedFields: ['context'],
+    questions: [{ id: 'metric', field: 'success.metric' }, { id: 'feedback', field: 'contact.feedback' }],
+    answers: [{ questionId: 'metric', value: 'Не знаю, уточню позднее' }, { questionId: 'feedback', value: 'Куратор', skipped: true }],
+  });
+  const result = templateResult(source, 'compose');
+  for (const field of ['title', 'users', 'context', 'success.metric', 'contact.feedback']) {
+    assert.ok(!result.evidence.some((item) => item.field === field));
+  }
+  assert.equal(result.proposal.title, 'Ручное название');
+  assert.equal(result.proposal.users, 'Ручная группа');
+  assert.equal(result.proposal.context, null);
+  assert.equal(result.proposal.success.metric, null);
+  assert.equal(result.proposal.contact.feedback, null);
+});
+
+test('direct deadline date evidence wins over a date mentioned in the mode answer', () => {
+  const source = task({
+    questions: [{ id: 'date', field: 'constraints.deadlineDate' }, { id: 'mode', field: 'constraints.deadlineMode' }],
+    answers: [{ questionId: 'date', value: ' 01.11.2026 ' }, { questionId: 'mode', value: 'Нужен к 2026-10-12' }],
+  });
+  const result = templateResult(source, 'compose');
+  assert.equal(result.proposal.constraints.deadlineDate, '2026-11-01');
+  assert.deepEqual(result.evidence.find(({ field }) => field === 'constraints.deadlineDate'), {
+    field: 'constraints.deadlineDate', sourceId: 'answer:date', quote: source.answers[0].value,
+  });
+});
+
+test('draft deadline evidence preserves the exact raw date phrase and quote bounds', () => {
+  const source = task({ draftText: `Нужен сайт.\r\nСрок   фиксированный: 12.10.2026. ${'Дополнительный текст. '.repeat(400)}` });
+  const result = templateResult(source, 'compose');
+  assert.equal(result.proposal.constraints.deadlineDate, '2026-10-12');
+  for (const field of ['constraints.deadlineMode', 'constraints.deadlineDate']) {
+    assert.deepEqual(result.evidence.find((item) => item.field === field), {
+      field, sourceId: 'draft', quote: 'Срок   фиксированный: 12.10.2026.',
+    });
+  }
+  for (const { quote } of result.evidence) {
+    assert.ok(source.draftText.includes(quote));
+    assert.ok(quote.length <= 6000);
+  }
+});

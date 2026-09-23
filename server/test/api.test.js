@@ -3,18 +3,27 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CARD_PATHS } from '../src/card.js';
 
 process.env.DB_PATH = join(mkdtempSync(join(tmpdir(), 'ai-sana-test-')), 'test.sqlite');
 process.env.AI_MODE = 'template';
 delete process.env.OPENAI_API_KEY;
 
-const { app } = await import('../src/app.js');
-const { db } = await import('../src/db.js');
+const { app, analysisHash } = await import('../src/app.js');
+const { db, taskFromRow } = await import('../src/db.js');
 
 test('полный путь: низкий рейтинг, AI fallback, рост баллов, два выбранных отклика', async (t) => {
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
+  const originalFetch = globalThis.fetch;
+  let externalRequests = 0;
+  const guardedFetch = t.mock.method(globalThis, 'fetch', (input, options) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url?.startsWith(`${base}/`)) return originalFetch(input, options);
+    externalRequests += 1;
+    throw new Error('External network is disabled in API tests');
+  });
   async function request(path, { method = 'GET', body, cookie } = {}) {
     const response = await fetch(base + path, {
       method,
@@ -37,6 +46,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     const id = created.body.task.id;
     assert.equal(created.body.task.revision, 1);
     assert.equal(created.body.task.rating.score, 0);
+    assert.equal(created.body.task.lastAnalysis, null);
 
     const noTitle = await request(`/api/tasks/${id}/confirm`, { method: 'POST', cookie: businessCookie, body: { revision: 1, confirmed: true } });
     assert.equal(noTitle.body.rating.score, 0);
@@ -58,9 +68,15 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(analyzed.status, 200);
     assert.equal(analyzed.body.mode, 'template');
     assert.ok(analyzed.body.questions.length >= 3);
+    const restoredAnalysis = (await request(`/api/tasks/${id}`, { cookie: businessCookie })).body.task.lastAnalysis;
+    assert.deepEqual(restoredAnalysis, analyzed.body);
+    assert.equal(restoredAnalysis.operation, 'analyze');
+    assert.equal(restoredAnalysis.stale, false);
+    assert.ok(Number.isFinite(Date.parse(restoredAnalysis.generatedAt)));
 
     const answered = await request(`/api/tasks/${id}`, { method: 'PATCH', cookie: businessCookie, body: { revision: 2, answers: [{ questionId: analyzed.body.questions[0].id, value: 'Вручную подбираем материалы', skipped: false }] } });
     assert.equal(answered.body.task.revision, 3);
+    assert.deepEqual(answered.body.task.lastAnalysis, { ...restoredAnalysis, stale: true });
     const stale = await request(`/api/tasks/${id}/publish`, { method: 'POST', cookie: businessCookie, body: { revision: 2 } });
     assert.equal(stale.status, 409);
 
@@ -79,6 +95,9 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     const stillPublicOldVersion = await request(`/api/tasks/${id}`);
     assert.equal(stillPublicOldVersion.body.task.card.context, null);
     assert.equal(stillPublicOldVersion.body.task.rating.score, 0);
+    assert.equal(Object.hasOwn(stillPublicOldVersion.body.task, 'lastAnalysis'), false);
+    assert.equal(Object.hasOwn(stillPublicOldVersion.body.task, 'evidence'), false);
+    assert.equal(Object.hasOwn(catalog.body.items[0], 'lastAnalysis'), false);
     const confirmedFull = await request(`/api/tasks/${id}/confirm`, { method: 'POST', cookie: businessCookie, body: { revision: 4, confirmed: true } });
     assert.equal(confirmedFull.body.rating.score, 100);
     assert.equal(confirmedFull.body.rating.breakdown.reduce((sum, row) => sum + row.earned, 0), 100);
@@ -209,6 +228,89 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     const flexibleResult = await request(`/api/tasks/${classroomId}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: flexible.body.task.revision, mode: 'compose' } });
     assert.equal(flexibleResult.body.proposal.constraints.deadlineMode, 'flexible');
     assert.equal(flexibleResult.body.proposal.constraints.deadlineDate, null);
+    await t.test('cached analysis restores the same proposal, timestamp and question IDs', async () => {
+      const createdDraft = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: {
+        draftText: 'Нужен сайт для студентов.', topic: 'education',
+      } });
+      const task = createdDraft.body.task;
+      const path = `/api/tasks/${task.id}`;
+      const generatedAt = '2026-09-23T10:00:00.000Z';
+      const questions = ['data.source', 'success.metric', 'result.scope'].map((field, i) => ({ id: `cached-${i}`, field, text: `Уточните ${field}`, sourceRevision: 1 }));
+      const result = {
+        questions, proposal: { ...task.workingCard, title: 'Сайт для студентов' }, warnings: [],
+        evidence: [{ field: 'title', sourceId: 'draft', quote: 'Нужен сайт для студентов.' }],
+      };
+      // A cached response must restore active questions even after another analysis.
+      const alternate = [{ id: 'alternate', field: 'users', text: 'Кто использует решение?', sourceRevision: 1 }];
+      db.prepare('UPDATE tasks SET questions_json=?, question_history_json=?, analysis_cache_json=? WHERE id=?').run(
+        JSON.stringify(alternate), JSON.stringify(alternate),
+        JSON.stringify({ analyze: { hash: analysisHash({ ...task, protectedFields: [] }, 'analyze'), result, generatedAt } }), task.id,
+      );
+      const previousMode = process.env.AI_MODE;
+      process.env.AI_MODE = 'auto';
+      try {
+        const cached = await request(`${path}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: 1, mode: 'analyze' } });
+        assert.equal(cached.status, 200);
+        assert.equal(cached.body.mode, 'cached');
+        assert.equal(cached.body.generatedAt, generatedAt);
+        assert.deepEqual(cached.body.questions, questions);
+        assert.deepEqual(cached.body.evidence, result.evidence);
+        const reopened = (await request(path, { cookie: businessCookie })).body.task;
+        assert.equal(reopened.revision, 1);
+        assert.equal(reopened.workingCard.title, null);
+        assert.equal(reopened.rating.score, 0);
+        assert.deepEqual(reopened.lastAnalysis, { ...cached.body, mode: 'live' });
+        assert.deepEqual(reopened.questions.filter((question) => question.id.startsWith('cached-')), questions);
+        assert.ok(reopened.questions.some((question) => question.id === 'alternate'));
+        assert.ok(reopened.questionHistory.some((q) => q.id === 'alternate'));
+        const answered = await request(path, { method: 'PATCH', cookie: businessCookie, body: {
+          revision: 1, answers: [{ questionId: 'cached-0', value: 'Тестовая таблица', skipped: false }],
+        } });
+        assert.equal(answered.status, 200);
+        assert.equal(answered.body.task.lastAnalysis.stale, true);
+        const stale = await request(path, { method: 'PATCH', cookie: businessCookie, body: {
+          revision: 2, sourceRevision: reopened.lastAnalysis.sourceRevision, cardPatch: result.proposal,
+        } });
+        assert.equal(stale.status, 409);
+      } finally {
+        process.env.AI_MODE = previousMode;
+      }
+    });
+
+    await t.test('oversized accumulated AI input falls back without a call or budget reservation', async () => {
+      db.prepare('INSERT INTO actors (id,kind,name,profile_json,created_at) VALUES (?,?,?,?,?)')
+        .run('business-long-input', 'business', 'Проверка длинного ввода', '{}', new Date().toISOString());
+      const session = await request('/api/demo/session', { method: 'POST', body: { actorId: 'business-long-input' } });
+      const cookie = session.cookie;
+      const created = await request('/api/tasks', { method: 'POST', cookie, body: { draftText: 'Я'.repeat(6000), topic: 'education' } });
+      assert.equal(created.status, 201);
+      const task = created.body.task;
+      const path = `/api/tasks/${task.id}`;
+      const questions = CARD_PATHS.filter((field) => field !== 'contact.channel').map((field, i) => ({ id: `long-${i}`, field, text: `Уточните ${field}`, sourceRevision: 1 }));
+      db.prepare('UPDATE tasks SET question_history_json=? WHERE id=?').run(JSON.stringify(questions), task.id);
+      const answers = questions.map((question) => ({ questionId: question.id, value: 'Я'.repeat(2000), skipped: false }));
+      const saved = await request(path, { method: 'PATCH', cookie, body: { revision: 1, answers } });
+      assert.equal(saved.status, 200);
+      const previousEnv = { AI_MODE: process.env.AI_MODE, OPENAI_API_KEY: process.env.OPENAI_API_KEY, OPENAI_MODEL: process.env.OPENAI_MODEL };
+      Object.assign(process.env, { AI_MODE: 'auto', OPENAI_API_KEY: 'test-no-network', OPENAI_MODEL: 'gpt-6-sol' });
+      try {
+        const analyzed = await request(`${path}/analyze`, { method: 'POST', cookie, body: { revision: 2, mode: 'compose' } });
+        assert.equal(analyzed.status, 200);
+        assert.equal(analyzed.body.mode, 'template');
+        assert.ok(analyzed.body.warnings.some((warning) => warning.includes('слишком много')));
+        const reopened = (await request(path, { cookie })).body.task;
+        assert.equal(reopened.draftText, task.draftText);
+        assert.deepEqual(reopened.answers, answers);
+        assert.deepEqual(reopened.lastAnalysis, analyzed.body);
+        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ai_usage WHERE task_id=?').get(task.id).count, 0);
+      } finally {
+        for (const [key, value] of Object.entries(previousEnv)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+    });
+
     await t.test('предварительный рейтинг сохраняется при повторном открытии и не попадает в каталог', async () => {
       const draft = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: {
         draftText: 'Студентам нужно находить свободные аудитории.', topic: 'education',
@@ -362,6 +464,12 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
       const beforeApply = await request(path, { cookie });
       assert.equal(beforeApply.body.task.workingCard.data.source, null);
       assert.equal(beforeApply.body.task.rating.score, 0);
+      assert.deepEqual(beforeApply.body.task.lastAnalysis, composed.body);
+      assert.equal(composed.body.operation, 'compose');
+      assert.deepEqual(composed.body.evidence.find((entry) => entry.field === 'data.source'), {
+        field: 'data.source', sourceId: `answer:${dataQuestion.id}`, quote: answers[0].value,
+      });
+      assert.equal(composed.body.evidence.some((entry) => ['need', 'context'].includes(entry.field)), false);
 
       const applied = await request(path, { method: 'PATCH', cookie, body: {
         revision: 5, sourceRevision: composed.body.sourceRevision,
@@ -372,6 +480,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
       assert.equal(applied.body.task.workingCard.context, null);
       assert.equal(applied.body.task.workingCard.data.source, answers[0].value);
       assert.equal(applied.body.task.rating.score, 0);
+      assert.equal(applied.body.task.lastAnalysis.stale, true);
 
       const changed = await request(path, { method: 'PATCH', cookie, body: { revision: 6, cardPatch: { users: 'Преподаватели университета.' } } });
       assert.equal(changed.status, 200);
@@ -382,7 +491,9 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
       assert.equal(afterStale.body.task.workingCard.users, 'Преподаватели университета.');
     });
   } finally {
+    guardedFetch.mock.restore();
     await new Promise((resolve) => server.close(resolve));
     db.close();
   }
+  assert.equal(externalRequests, 0, 'API tests must never call an external provider');
 });
