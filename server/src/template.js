@@ -1,6 +1,7 @@
 import { getField, scoreCard, setField } from './card.js';
 import { latestAnswerSources, latestAnswerStates } from './sources.js';
 import { addFact, canSuggest, protectedPaths, startingProposal } from './proposal.js';
+import { isUnknownValue } from '../../shared/card-values.js';
 
 const questionText = {
   title: 'Как коротко назвать задачу, чтобы команда поняла её назначение?',
@@ -28,9 +29,7 @@ const priority = [
 ];
 const enumFields = new Set(['data.availability', 'constraints.deadlineMode', 'constraints.deadlineDate']);
 const normalize = (text) => typeof text === 'string' ? text.trim().replace(/\s+/g, ' ') : '';
-const unknown = (text) => !text
-  || /^(?:пока )?(?:не знаю|не знаем|неизвестно|не определено|не определились|нет информации|нет ответа|не уверен|затрудняюсь ответить)/iu.test(text)
-  || /^(?:потом|обсудим позже|уточним позже|unknown|not sure|i don.t know|n\/?a|[-—?]+)[.!?]*$/iu.test(text);
+const unknown = isUnknownValue;
 const uncertain = (text) => /(?:не знаю|не знаем|неизвестн|возможно|может быть|вероятно|наверно|предположительно|не уверен|не могу сказать|не можем сказать|если |не все |\?)/iu.test(text);
 
 function parseAvailability(text) {
@@ -117,9 +116,12 @@ export function templateResult(task, mode) {
   const proposal = result.proposal;
   const protectedFields = protectedPaths(task);
   const answerStates = latestAnswerStates(task);
-  const unresolved = new Set(answerStates.filter((answer) => answer.skipped || !answer.text?.trim()).map((answer) => answer.field));
+  const unresolved = new Set(answerStates.filter((answer) => answer.skipped || unknown(answer.text)).map((answer) => answer.field));
   const warnings = [];
   const warn = (message) => { if (!warnings.includes(message)) warnings.push(message); };
+  for (const answer of answerStates) {
+    if (!answer.skipped && answer.text?.trim() && unknown(answer.text) && enumFields.has(answer.field)) warn(`Ответ для ${answer.field} не определён; поле оставлено пустым.`);
+  }
   const sourceText = (raw) => {
     if (typeof raw !== 'string') return '';
     if (raw.length > 6000) warn('Источник длиннее 6000 символов; использовано начало текста, проверьте пропущенные сведения.');

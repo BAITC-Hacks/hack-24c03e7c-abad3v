@@ -151,6 +151,14 @@
 .compare-checkbox input { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
 .response-decision { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .response-decision > span { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+.response-decision-saved { display: grid; gap: 9px; max-width: 100%; }
+.response-decision-saved > span { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+.decision-editor > summary { color: var(--accent); font-size: 14px; cursor: pointer; width: fit-content; padding: 3px 0; }
+.decision-editor > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 3px; }
+.decision-editor-body { margin-top: 9px; padding: 13px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.decision-editor-body > p { margin: 0 0 11px; color: var(--muted); font-size: 14px; }
+.decision-editor-body > div { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.comparison-table .decision-editor-body > div { align-items: stretch; flex-direction: column; }
 .response-team-status { color: var(--muted); font-size: 14px; }
 .comparison-section > h2 { margin: 0 0 6px; color: var(--ink); font-size: 24px; font-weight: 600; }
 .comparison-section > p { margin: 0 0 20px; color: var(--muted); font-size: 16px; }

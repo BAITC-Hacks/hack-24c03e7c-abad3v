@@ -306,9 +306,11 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
     return question;
   }) : task.questions;
   const payload = { questions, proposal: result.proposal, warnings: [...result.warnings, ...fallbackWarnings], evidence: result.evidence };
-  const lastAnalysis = { ...payload, operation: body.mode, sourceRevision: row.revision, generatedAt, mode: mode === 'cached' ? 'live' : mode };
+  const originMode = mode === 'cached' ? 'live' : mode;
+  const inputSnapshot = { draftText: task.draftText, topic: task.topic, answers: task.answers, manualFields: task.manualFields };
+  const lastAnalysis = { ...payload, operation: body.mode, sourceRevision: row.revision, generatedAt, mode: originMode, originMode, inputSnapshot };
   transaction(() => {
-    if (body.mode === 'analyze') db.prepare('UPDATE tasks SET questions_json=?,question_history_json=? WHERE id=?').run(encode(history), encode(history), row.id);
+    if (body.mode === 'analyze') db.prepare('UPDATE tasks SET questions_json=?,active_questions_json=?,question_history_json=? WHERE id=?').run(encode(questions), encode(questions), encode(history), row.id);
     if (mode !== 'cached') {
       const latestCache = decode(latest.analysis_cache_json);
       latestCache[body.mode] = { hash, result: payload, generatedAt, originMode: mode };
@@ -370,11 +372,11 @@ app.patch('/api/applications/:id', wrap((req, res) => {
   res.json({ application: applicationFromRow(saved) });
 }));
 
-const clientDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../client/dist');
+const clientDist = resolve(dirname(fileURLToPath(import.meta.url)), '../../dist');
 if (existsSync(clientDist)) {
   app.use(express.static(clientDist));
   app.use((req, res, next) => {
-    if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+    if (req.method !== 'GET' || req.path === '/api' || req.path.startsWith('/api/')) return next();
     res.sendFile(resolve(clientDist, 'index.html'));
   });
 }

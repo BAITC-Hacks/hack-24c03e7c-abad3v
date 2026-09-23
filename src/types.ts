@@ -29,7 +29,7 @@ export type TaskSummary = {
 
 export type OwnerTask = {
   id: string; draftText: string; topic: Topic; workingCard: Card; confirmedCard: Card | null
-  questions: Question[]; answers: Answer[]; revision: number; confirmedRevision: number | null
+  questions: Question[]; questionHistory?: Question[]; answers: Answer[]; revision: number; confirmedRevision: number | null
   publicationStatus: 'draft' | 'published'; rating: Rating; publishedAt: string | null
   createdAt: string; updatedAt: string
   previewRating?: Rating; publishedRevision?: number | null; publishedCard?: Card | null
@@ -43,4 +43,8 @@ export type Application = {
 }
 export type Actor = { id: string; kind: Role; name: string; profile: string | Record<string, unknown> }
 export type Evidence = { field: string; sourceId: string; quote: string }
-export type AiResult = { sourceRevision: number; questions: Question[]; proposal: Card; warnings: string[]; mode: 'live' | 'cached' | 'template'; evidence?: Evidence[] }
+export type AiResult = {
+  sourceRevision: number; questions: Question[]; proposal: Card; warnings: string[]; mode: 'live' | 'cached' | 'template'; evidence?: Evidence[]
+  originMode?: 'live' | 'template'; operation?: 'analyze' | 'compose'; generatedAt?: string; stale?: boolean
+  inputSnapshot?: { draftText: string; topic: Topic; answers: Answer[]; manualFields: string[] }
+}

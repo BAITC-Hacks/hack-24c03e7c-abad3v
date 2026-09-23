@@ -1,3 +1,5 @@
+import { hasMeaningfulValue, normalizeKnownValue } from '../../shared/card-values.js';
+
 export const TOPICS = ['education', 'career', 'operations', 'analytics', 'other'];
 export const LEVELS = ['needs_clarification', 'workable', 'ready', 'priority'];
 
@@ -60,7 +62,7 @@ export function mergeCard(card, patch) {
         walk(fieldValue, path);
       } else {
         if (!CARD_PATHS.includes(path)) throw new CardError(`Неизвестное поле ${path}`);
-        const normalized = cleanText(fieldValue, path === 'title' ? 120 : 1000);
+        const normalized = normalizeKnownValue(cleanText(fieldValue, path === 'title' ? 120 : 1000));
         if (path === 'data.availability' && normalized && !['available', 'planned', 'unavailable'].includes(normalized)) throw new CardError('Некорректный статус данных');
         if (path === 'constraints.deadlineMode' && normalized && !['fixed', 'flexible'].includes(normalized)) throw new CardError('Некорректный тип срока');
         if (path === 'constraints.deadlineDate' && normalized && !validDate(normalized)) throw new CardError('Срок должен быть действительной датой YYYY-MM-DD');
@@ -72,7 +74,7 @@ export function mergeCard(card, patch) {
   return next;
 }
 
-const filled = (value) => typeof value === 'string' && value.length > 0 && !/^(не знаю|потом|нет информации|тест|[-—?]+)$/i.test(value.trim());
+const filled = hasMeaningfulValue;
 const hasContact = (value) => filled(value) && (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) || /^https?:\/\//i.test(value));
 const checks = [
   {

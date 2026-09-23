@@ -95,6 +95,7 @@ for (const [name, definition] of Object.entries({
   last_analysis_json: 'TEXT',
   manual_fields_json: "TEXT NOT NULL DEFAULT '[]'",
   question_history_json: "TEXT NOT NULL DEFAULT '[]'",
+  active_questions_json: 'TEXT',
   protected_fields_json: "TEXT NOT NULL DEFAULT '[]'",
   industry: 'TEXT',
   completeness: 'TEXT',
@@ -110,6 +111,24 @@ for (const row of db.prepare("SELECT * FROM tasks WHERE publication_status='publ
 db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_public_snapshot ON tasks(publication_status,published_score DESC,published_at DESC)');
 db.exec('UPDATE tasks SET last_analysis_json=ai_result_json WHERE last_analysis_json IS NULL AND ai_result_json IS NOT NULL');
 db.exec('UPDATE tasks SET ai_result_json=last_analysis_json WHERE ai_result_json IS NULL AND last_analysis_json IS NOT NULL');
+
+// Earlier versions mixed the active batch and its archive in questions_json.
+// Recover the last exact analyze batch before falling back to the legacy list;
+// never discard historical questions, because saved answers refer to their IDs.
+for (const row of db.prepare('SELECT * FROM tasks WHERE active_questions_json IS NULL').all()) {
+  const legacy = JSON.parse(row.questions_json);
+  const analysis = JSON.parse(row.last_analysis_json || 'null');
+  const cache = JSON.parse(row.analysis_cache_json);
+  const batch = analysis?.operation === 'analyze' ? analysis.questions : cache.analyze?.result?.questions;
+  const active = Array.isArray(batch) && batch.length <= 5 ? batch : legacy.slice(-5);
+  const history = [...new Map([...JSON.parse(row.question_history_json), ...legacy, ...active].map((question) => [question.id, question])).values()];
+  db.prepare('UPDATE tasks SET active_questions_json=?,questions_json=?,question_history_json=? WHERE id=?')
+    .run(JSON.stringify(active), JSON.stringify(active), JSON.stringify(history), row.id);
+  if (analysis) {
+    const restored = JSON.stringify({ ...analysis, questions: active });
+    db.prepare('UPDATE tasks SET last_analysis_json=?,ai_result_json=? WHERE id=?').run(restored, restored, row.id);
+  }
+}
 
 const applicationColumns = new Set(db.prepare('PRAGMA table_info(applications)').all().map((column) => column.name));
 for (const [name, definition] of Object.entries({ decision_source: 'TEXT', link_kind: 'TEXT', is_synthetic: 'INTEGER NOT NULL DEFAULT 0' })) {
@@ -138,7 +157,7 @@ export function actorFromRow(row) {
 }
 
 export function questionHistoryFromRow(row) {
-  return [...new Map([...decode(row.question_history_json), ...decode(row.questions_json)]
+  return [...new Map([...decode(row.question_history_json), ...decode(row.questions_json), ...(decode(row.active_questions_json) || [])]
     .map((question) => [question.id, question])).values()];
 }
 
@@ -162,7 +181,7 @@ export function taskFromRow(row) {
     aiResult: lastAnalysis,
     lastAnalysis,
     manualFields: [...new Set([...decode(row.manual_fields_json), ...decode(row.protected_fields_json)])],
-    questions: decode(row.questions_json),
+    questions: decode(row.active_questions_json) ?? decode(row.questions_json),
     questionHistory: questionHistoryFromRow(row),
     answers: decode(row.answers_json),
     revision: row.revision,

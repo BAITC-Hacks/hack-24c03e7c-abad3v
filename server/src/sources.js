@@ -1,4 +1,5 @@
 import { CARD_PATHS } from './card.js';
+import { hasMeaningfulValue } from '../../shared/card-values.js';
 
 // The client appends an edited answer to the end of the saved array.
 // The latest skip/clear explicitly withdraws a previous answer for the field.
@@ -18,6 +19,6 @@ export function latestAnswerStates(task) {
 
 export function latestAnswerSources(task) {
   return latestAnswerStates(task)
-    .filter((answer) => !answer.skipped && typeof answer.text === 'string' && answer.text.trim())
+    .filter((answer) => !answer.skipped && hasMeaningfulValue(answer.text))
     .map(({ skipped, ...source }) => source);
 }

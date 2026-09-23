@@ -1,4 +1,5 @@
 import { mockApi } from './mockApi'
+import { listAllPages } from './listPages'
 import type { Actor, AiResult, Answer, Application, Card, Level, OwnerTask, PublicTask, Rating, TaskSummary, Topic } from './types'
 
 const useMock = import.meta.env.VITE_API_MODE === 'mock'
@@ -22,10 +23,15 @@ export const api = {
   selectSession: (actorId: string) => useMock ? mockApi.selectSession(actorId) : request<{ actor: Actor }>('/demo/session', json({ actorId })),
   listTasks: (params: { scope: 'mine' | 'catalog'; topic?: Topic; level?: Level }) => {
     if (useMock) return mockApi.listTasks(params)
-    const query = new URLSearchParams({ scope: params.scope, limit: '100' })
+    const query = new URLSearchParams({ scope: params.scope })
     if (params.topic) query.set('topic', params.topic)
     if (params.level) query.set('level', params.level)
-    return request<{ items: TaskSummary[]; total: number }>(`/tasks?${query}`)
+    return listAllPages<TaskSummary>(({ limit, offset }) => {
+      const pageQuery = new URLSearchParams(query)
+      pageQuery.set('limit', String(limit))
+      pageQuery.set('offset', String(offset))
+      return request<{ items: TaskSummary[]; total: number }>(`/tasks?${pageQuery}`)
+    })
   },
   getTask: (id: string) => useMock ? mockApi.getTask(id) : request<{ task: OwnerTask | PublicTask }>(`/tasks/${id}`),
   createTask: (draftText: string, topic: Topic) => useMock ? mockApi.createTask({ draftText, topic }) : request<{ task: OwnerTask }>('/tasks', json({ draftText, topic })),
@@ -43,7 +49,7 @@ export const api = {
     : request<{ task: OwnerTask }>(`/tasks/${id}/publish`, json({ revision })),
   listApplications: (taskId?: string) => useMock
     ? mockApi.listApplications(taskId)
-    : request<{ items: Application[]; total: number }>(`/tasks${taskId ? `/${taskId}` : ''}/applications`),
+    : listAllPages<Application>(({ limit, offset }) => request<{ items: Application[]; total: number }>(`/tasks${taskId ? `/${taskId}` : ''}/applications?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`)),
   createApplication: (taskId: string, body: { idea: string; plan: string; timeline: string; prototypeUrl: string; clientRequestId: string }) => useMock
     ? mockApi.createApplication(taskId, body)
     : request<{ application: Application }>(`/tasks/${taskId}/applications`, json(body)),

@@ -36,3 +36,9 @@
 .rating-breakdown section > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--ink); font-size: 13px; }
 .rating-breakdown section > div > span { flex-shrink: 0; color: var(--accent); }
 .rating-breakdown section > p { margin: 7px 0 0; font-size: 12px; }
+.assistant-state { margin: 0 0 22px; padding: 16px 20px; border: 1px solid var(--line); border-radius: 8px; background: #f8fbff; color: #425b7c; }
+.assistant-state > div { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; font-size: 14px; }
+.assistant-state > div > span { color: var(--muted); font-size: 13px; }
+.assistant-state p { margin: 8px 0 10px; font-size: 13px; line-height: 1.65; }
+.assistant-state .text-button { font-size: 13px; }
+.assistant-state.needs-refresh { border-color: #e7d9b9; background: #fffcf5; }

@@ -1,4 +1,5 @@
-import type { AiResult, Answer, Card, Evidence, OwnerTask, Topic } from './types'
+import type { AiResult, Answer, Card, Evidence, OwnerTask, Question, Topic } from './types'
+import { normalizeKnownValue } from '../shared/card-values.js'
 
 export type EditorForm = { draftText: string; topic: Topic; card: Card; answers: Answer[]; manualFields: string[] }
 export const fields = [
@@ -22,7 +23,7 @@ export function mergeProposal(form: EditorForm, result: AiResult, baseline: Card
   let card = structuredClone(form.card)
   const changed: string[] = []
   for (const [path] of fields) {
-    const value = getField(result.proposal, path)
+    const value = normalizeKnownValue(getField(result.proposal, path))
     if (form.manualFields.includes(path) || getField(card, path) !== getField(baseline, path) || value === getField(card, path)) continue
     card = setField(card, path, value); changed.push(path)
   }
@@ -30,7 +31,7 @@ export function mergeProposal(form: EditorForm, result: AiResult, baseline: Card
 }
 export function answerIntoCard(form: EditorForm, field: string, value: string | null): EditorForm {
   if (form.manualFields.includes(field)) return form
-  if (value && /^(не знаю|пока не знаю|неизвестно|нет информации)$/i.test(value.trim())) value = null
+  value = normalizeKnownValue(value)
   if (field === 'data.availability' && value && !['available', 'planned', 'unavailable'].includes(value)) return form
   if (field === 'constraints.deadlineMode' && value && !['fixed', 'flexible'].includes(value)) return form
   let card = setField(form.card, field, value)
@@ -38,11 +39,24 @@ export function answerIntoCard(form: EditorForm, field: string, value: string | 
   if (field === 'constraints.deadlineMode' && value !== 'fixed') card = setField(card, 'constraints.deadlineDate', null)
   return { ...form, card }
 }
+export function recordAnswer(form: EditorForm, question: Question, value: string | null, skipped = false): EditorForm {
+  let next: EditorForm = {
+    ...form,
+    answers: [...form.answers.filter(answer => answer.questionId !== question.id), { questionId: question.id, value: skipped ? null : value, skipped }],
+  }
+  next = answerIntoCard(next, question.field, skipped ? null : value)
+  const knownValue = normalizeKnownValue(value)
+  if (question.field === 'success.metric' && !skipped && !form.manualFields.includes('success.metric')
+    && !form.manualFields.includes('success.target') && knownValue && /\d|минимум|хотя бы|не менее|четверо|пятеро/i.test(knownValue)) {
+    next = answerIntoCard(next, 'success.target', knownValue)
+  }
+  return next
+}
 export function evidenceFor(path: string, form: EditorForm, task: OwnerTask, result: AiResult | null): Evidence | undefined {
   if (form.manualFields.includes(path)) return undefined
   const value = getField(form.card, path)
-  const questions = task.questions.filter(q => q.field === path || (path === 'success.target' && form.card.success.target === form.card.success.metric && q.field === 'success.metric'))
-  const answer = form.answers.find(a => questions.some(q => q.id === a.questionId) && !a.skipped && a.value && value === a.value)
+  const questions = [...(task.questionHistory || []), ...task.questions].filter(q => q.field === path || (path === 'success.target' && form.card.success.target === form.card.success.metric && q.field === 'success.metric'))
+  const answer = form.answers.find(a => questions.some(q => q.id === a.questionId) && !a.skipped && a.value && value && value === normalizeKnownValue(a.value))
   if (answer?.value) return { field: path, sourceId: `answer:${answer.questionId}`, quote: answer.value }
   return result?.evidence?.find(item => {
     if (item.field !== path || !value || getField(result.proposal, path) !== value || !item.quote) return false

@@ -220,10 +220,14 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(regenerated.body.proposal.constraints.deadlineMode, 'fixed');
     assert.equal(regenerated.body.proposal.constraints.deadlineDate, '2026-10-15');
     const composed = await request(`/api/tasks/${classroomId}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision, mode: 'compose' } });
+    assert.deepEqual(composed.body.questions, regenerated.body.questions, 'compose keeps the current batch instead of restoring archived questions');
     assert.equal(composed.body.proposal.success.target, success);
     assert.ok(composed.body.evidence.some((item) => item.field === 'success.target' && item.sourceId === `answer:${successQuestion.id}` && item.quote === success));
     const savedQuestions = await request(`/api/tasks/${classroomId}`, { cookie: businessCookie });
-    assert.ok(savedQuestions.body.task.questions.some((question) => question.id === successQuestion.id));
+    assert.deepEqual(savedQuestions.body.task.questions, regenerated.body.questions);
+    assert.deepEqual(savedQuestions.body.task.aiResult.questions, regenerated.body.questions);
+    assert.ok(savedQuestions.body.task.questionHistory.some((question) => question.id === successQuestion.id));
+    assert.equal(savedQuestions.body.task.questions.some((question) => question.id === successQuestion.id), false);
     const flexible = await request(`/api/tasks/${classroomId}`, { method: 'PATCH', cookie: businessCookie, body: { revision, answers: [{ questionId: deadlineQuestion.id, value: 'flexible', skipped: false }] } });
     const flexibleResult = await request(`/api/tasks/${classroomId}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: flexible.body.task.revision, mode: 'compose' } });
     assert.equal(flexibleResult.body.proposal.constraints.deadlineMode, 'flexible');
@@ -260,8 +264,8 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
         assert.equal(reopened.workingCard.title, null);
         assert.equal(reopened.rating.score, 0);
         assert.deepEqual(reopened.lastAnalysis, { ...cached.body, mode: 'live' });
-        assert.deepEqual(reopened.questions.filter((question) => question.id.startsWith('cached-')), questions);
-        assert.ok(reopened.questions.some((question) => question.id === 'alternate'));
+        assert.deepEqual(reopened.questions, questions);
+        assert.equal(reopened.questions.some((question) => question.id === 'alternate'), false);
         assert.ok(reopened.questionHistory.some((q) => q.id === 'alternate'));
         const answered = await request(path, { method: 'PATCH', cookie: businessCookie, body: {
           revision: 1, answers: [{ questionId: 'cached-0', value: 'Тестовая таблица', skipped: false }],
@@ -449,6 +453,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
         if (previous) assert.equal(question.id, previous.id);
       }
       const reopened = await request(path, { cookie });
+      assert.deepEqual(reopened.body.task.questions, second.body.questions);
       assert.ok(reopened.body.task.questionHistory.some((question) => question.id === dataQuestion.id));
       assert.deepEqual(reopened.body.task.answers, answers);
       const resaved = await request(path, { method: 'PATCH', cookie, body: { revision: 4, answers } });
@@ -456,6 +461,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
 
       const composed = await request(`${path}/analyze`, { method: 'POST', cookie, body: { revision: 5, mode: 'compose' } });
       assert.equal(composed.status, 200);
+      assert.deepEqual(composed.body.questions, second.body.questions);
       assert.equal(composed.body.proposal.need, 'Моя формулировка потребности.');
       assert.equal(composed.body.proposal.context, null);
       assert.match(composed.body.proposal.result.artifact, /сайт/);
@@ -465,6 +471,9 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
       assert.equal(beforeApply.body.task.workingCard.data.source, null);
       assert.equal(beforeApply.body.task.rating.score, 0);
       assert.deepEqual(beforeApply.body.task.lastAnalysis, composed.body);
+      assert.deepEqual(beforeApply.body.task.questions, second.body.questions);
+      assert.equal(composed.body.originMode, 'template');
+      assert.deepEqual(composed.body.inputSnapshot.answers, answers);
       assert.equal(composed.body.operation, 'compose');
       assert.deepEqual(composed.body.evidence.find((entry) => entry.field === 'data.source'), {
         field: 'data.source', sourceId: `answer:${dataQuestion.id}`, quote: answers[0].value,

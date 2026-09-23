@@ -1,4 +1,5 @@
 import { actors, applications, blankCard, datasetVersion, labelForTopic, tasks } from './fixtures'
+import { hasMeaningfulValue } from '../shared/card-values.js'
 import type { AiResult, Answer, Application, Card, Level, OwnerTask, PublicTask, Rating, TaskSummary, Topic } from './types'
 
 type Evidence = { field: string; sourceId: string; quote: string }
@@ -109,7 +110,7 @@ function setField(card: Card, path: string, value: string | null) {
   const parent = parts.slice(0, -1).reduce<unknown>((object, key) => (object as Record<string, unknown>)[key], card) as Record<string, unknown>
   parent[parts[parts.length - 1]] = value
 }
-const filled = (value: string | null) => Boolean(value?.trim() && !/^(не знаю|потом|нет информации|тест|[-—?]+)$/i.test(value.trim()))
+const filled = hasMeaningfulValue
 const validDate = (value: string | null): boolean => {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
   const date = new Date(`${value}T00:00:00.000Z`)
@@ -156,6 +157,12 @@ function refresh(task: StoredTask): StoredTask {
   return task
 }
 for (const task of taskStore) {
+  if (!Array.isArray(task.questionHistory)) {
+    task.questionHistory = structuredClone(task.questions)
+    const savedBatch = task.aiResult?.questions
+    task.questions = savedBatch?.length && savedBatch.length <= 5 ? structuredClone(savedBatch) : task.questions.slice(-5)
+    if (task.aiResult) task.aiResult.questions = structuredClone(task.questions)
+  }
   if (task.publishedCard === undefined) task.publishedCard = task.publicationStatus === 'published' ? structuredClone(task.confirmedCard) : null
   if (task.publishedRevision === undefined) task.publishedRevision = task.publicationStatus === 'published' ? task.confirmedRevision : null
   if (task.publishedRating === undefined) task.publishedRating = task.publishedCard ? structuredClone(task.rating) : null
@@ -217,15 +224,28 @@ function templateResult(task: StoredTask, mode: 'analyze' | 'compose'): AiResult
   const proposal = structuredClone(task.workingCard)
   const previousEvidence = task.aiResult?.evidence || []
   const protectedFields = new Set(task.manualFields || [])
-  const sources = new Map([['draft', task.draftText], ...task.answers.filter((answer) => !answer.skipped && answer.value).map((answer) => [`answer:${answer.questionId}`, answer.value!] as [string, string])])
+  const questionFields = new Map([...(task.questionHistory || []), ...task.questions].map((question) => [question.id, question.field]))
+  const latestAnswers = new Map<string, Answer>()
+  for (const answer of task.answers) {
+    const field = questionFields.get(answer.questionId) || (answer.questionId.startsWith('q:') ? answer.questionId.slice(2) : undefined)
+    if (field && field in questionText) latestAnswers.set(field, answer)
+  }
+  const blockedFields = new Set<string>()
+  for (const [field, answer] of latestAnswers) if (answer.skipped || !filled(answer.value)) {
+    blockedFields.add(field)
+    if (field === 'success.metric') blockedFields.add('success.target')
+    if (field === 'constraints.deadlineMode') blockedFields.add('constraints.deadlineDate')
+  }
+  for (const field of blockedFields) if (!protectedFields.has(field)) setField(proposal, field, null)
+  const sources = new Map([['draft', task.draftText], ...[...latestAnswers.values()].filter((answer) => !answer.skipped && filled(answer.value)).map((answer) => [`answer:${answer.questionId}`, answer.value!] as [string, string])])
   const evidence: Evidence[] = []
   for (const item of previousEvidence) {
-    if (protectedFields.has(item.field)) continue
+    if (protectedFields.has(item.field) || blockedFields.has(item.field)) continue
     if (sources.get(item.sourceId)?.includes(item.quote)) evidence.push(item)
     else if (task.aiResult && fieldValue(proposal, item.field) === fieldValue(task.aiResult.proposal, item.field)) setField(proposal, item.field, null)
   }
   const propose = (field: string, value: string | null, sourceId: string, quote: string, replace = false) => {
-    if (!value || protectedFields.has(field)) return
+    if (!filled(value) || protectedFields.has(field) || blockedFields.has(field)) return
     const current = fieldValue(proposal, field)
     if (current && current !== 'Новая задача' && !replace && !previousEvidence.some((item) => item.field === field && item.sourceId === sourceId)) return
     setField(proposal, field, value)
@@ -254,10 +274,8 @@ function templateResult(task: StoredTask, mode: 'analyze' | 'compose'): AiResult
     if (scope) propose('result.scope', scope.slice(0, 1000), 'draft', scope)
   }
 
-  for (const answer of task.answers) {
+  for (const [field, answer] of latestAnswers) {
     if (answer.skipped || !filled(answer.value)) continue
-    const field = task.questions.find((question) => question.id === answer.questionId)?.field || (answer.questionId.startsWith('q:') ? answer.questionId.slice(2) : undefined)
-    if (!field || !(field in questionText)) continue
     const value = answer.value!.trim()
     const source = `answer:${answer.questionId}`
     if (field === 'data.availability') {
@@ -281,8 +299,11 @@ function templateResult(task: StoredTask, mode: 'analyze' | 'compose'): AiResult
   }
   const priorities = ['data.availability', 'success.metric', 'result.artifact', 'constraints.deadlineMode', 'data.source', 'users', 'result.scope', 'success.target', 'constraints.technologyAccess', 'contact.channel', 'contact.consultation', 'contact.feedback', 'need', 'context']
   if (proposal.constraints.deadlineMode === 'fixed' && !validDate(proposal.constraints.deadlineDate)) priorities.unshift('constraints.deadlineDate')
-  const questions = mode === 'compose' ? [] : priorities.filter((field) => !filled(fieldValue(proposal, field))).slice(0, 5).map((field) => ({ id: `q:${field}`, field, text: questionText[field], sourceRevision: task.revision }))
-  return { sourceRevision: task.revision, questions, proposal, evidence, warnings: [], mode: 'template' }
+  const questions = mode === 'compose' ? structuredClone(task.questions) : priorities.filter((field) => !filled(fieldValue(proposal, field))).slice(0, 5).map((field) => ({ id: `q:${field}`, field, text: questionText[field], sourceRevision: task.revision }))
+  return {
+    sourceRevision: task.revision, questions, proposal, evidence, warnings: [], mode: 'template', originMode: 'template', operation: mode, generatedAt: new Date().toISOString(), stale: false,
+    inputSnapshot: structuredClone({ draftText: task.draftText, topic: task.topic, answers: task.answers, manualFields: task.manualFields || [] }),
+  }
 }
 
 export const mockApi = {
@@ -320,7 +341,7 @@ export const mockApi = {
     const card = blankCard()
     const task: StoredTask = {
       id: `task-${nextTask++}`, businessId: activeActor.id, draftText: input.draftText.trim(), topic: input.topic, workingCard: card, confirmedCard: null,
-      questions: [], answers: [], revision: 1, confirmedRevision: null, publicationStatus: 'draft', rating: scoreCard(card),
+      questions: [], questionHistory: [], answers: [], revision: 1, confirmedRevision: null, publicationStatus: 'draft', rating: scoreCard(card),
       publishedCard: null, publishedRating: null, publishedRevision: null, aiResult: null, manualFields: [],
       publishedAt: null, createdAt: timestamp, updatedAt: timestamp,
     }
@@ -336,7 +357,10 @@ export const mockApi = {
     if (body.draftText !== undefined) task.draftText = body.draftText
     if (body.topic !== undefined) task.topic = body.topic
     if (body.cardPatch) task.workingCard = mergeCard(task.workingCard, body.cardPatch)
-    if (body.answers !== undefined) task.answers = body.answers
+    if (body.answers !== undefined) {
+      const submitted = new Set(body.answers.map((answer) => answer.questionId))
+      task.answers = [...task.answers.filter((answer) => !submitted.has(answer.questionId)), ...body.answers]
+    }
     if (body.manualFields !== undefined) task.manualFields = [...new Set([...(task.manualFields || []), ...body.manualFields])]
     task.revision += 1
     task.updatedAt = new Date().toISOString()
@@ -350,9 +374,10 @@ export const mockApi = {
     requireRevision(task, revision)
     const result = templateResult(task, mode)
     if (mode === 'analyze') {
-      const allQuestions = new Map(task.questions.map((question) => [question.id, question]))
+      const allQuestions = new Map([...(task.questionHistory || []), ...task.questions].map((question) => [question.id, question]))
       for (const question of result.questions) allQuestions.set(question.id, question)
-      task.questions = [...allQuestions.values()]
+      task.questionHistory = [...allQuestions.values()]
+      task.questions = structuredClone(result.questions)
     }
     task.aiResult = result
     persist()
