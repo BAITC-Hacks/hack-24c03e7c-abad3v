@@ -4,26 +4,22 @@
 
 ## Запуск
 
-Нужен Node.js 24.x с `node:sqlite`. Откройте **два терминала** в корне проекта.
-
-Терминал 1 — API:
+Нужен Node.js 24.x с `node:sqlite`. Установка выполняется из корня проекта через npm workspaces.
 
 ```powershell
-cd server
-npm.cmd install
-Copy-Item .env.example .env
-npm.cmd run seed
-npm.cmd run dev
+npm install
+npm run seed
+npm run dev
 ```
 
-Терминал 2 — интерфейс:
+Сценарий `npm run dev` запускает backend и Vite одновременно. Откройте адрес Vite из терминала (обычно `http://localhost:5173`). API работает на `http://localhost:3001`; проверка: `http://localhost:3001/api/health` возвращает `{"status":"ok","db":"ok"}`. Vite проксирует `/api` на порт 3001. Интерфейс по умолчанию использует настоящий локальный API и автоматически выбирает демо-профиль. Демо-профили создаются при старте сервера; `seed` можно повторять без дублирования задач и откликов.
+
+Если нужен только один сервис, используйте:
 
 ```powershell
-npm.cmd install
-npm.cmd run dev
+npm run dev:server
+npm run dev:client
 ```
-
-Откройте адрес Vite из терминала (обычно `http://localhost:5173`). API работает на `http://localhost:3001`; проверка: `http://localhost:3001/api/health` возвращает `{"status":"ok","db":"ok"}`. Vite проксирует `/api` на порт 3001. Интерфейс по умолчанию использует настоящий локальный API и автоматически выбирает демо-профиль. Демо-профили создаются при старте сервера; `seed` можно повторять без дублирования задач и откликов.
 
 Если нужен автономный просмотр интерфейса без сервера, скопируйте корневой `.env.example` в `.env.local` и задайте `VITE_API_MODE=mock`. После изменения перезапустите Vite. Mock содержит синтетические данные и не сохраняет действия на backend.
 
