@@ -1,6 +1,6 @@
 # Контракт frontend ↔ backend для MVP AI Sana
 
-Версия: 1.2. Обратно совместимые дополнения: `previewRating` в ответах владельцу, `questionHistory` в `OwnerTask`, безопасное применение AI через `sourceRevision` в PATCH. Существующий `rating` сохраняет свой смысл. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
+Версия: 1.3. Обратно совместимые дополнения: `lastAnalysis` в ответах владельцу, `evidence`, `operation`, `generatedAt` и `stale` в AI-ответе. Сохраняются `previewRating`, `questionHistory`, применение AI через `sourceRevision` в PATCH и прежний смысл `rating`. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
 
 ## Общие правила
 
@@ -155,6 +155,7 @@ type OwnerTask = {
   questions: Question[];
   questionHistory: Question[];
   answers: Answer[];
+  lastAnalysis: LastAnalysis | null;
   revision: number;
   confirmedRevision: number | null;
   publicationStatus: "draft" | "published";
@@ -168,7 +169,7 @@ type OwnerTask = {
 
 После подтверждения `confirmedCard` содержит полный Card и `confirmedRevision === revision`. При изменении опубликованной задачи `workingCard` может быть новее `confirmedCard`; в каталоге остаётся предыдущая подтверждённая версия до следующего подтверждения.
 
-`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions`, `questionHistory`, `draftText` или `previewRating`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде.
+`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions`, `questionHistory`, `draftText`, `previewRating`, `lastAnalysis` или `evidence`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде.
 
 Строка списка `TaskSummary`: `{id,title,topic,rating,publicationStatus,publishedAt,applicationCount,previewRating?}`. В каталоге title/topic/rating берутся из подтверждённой версии, `previewRating` отсутствует даже при запросе владельца. В списке бизнеса (`scope=mine`) title — рабочий `title` или первые 60 символов `draftText`, topic — рабочая тема, `rating` — подтверждённый балл (0 до первого подтверждения), `previewRating` — балл сохранённого черновика. Поэтому общий frontend-тип `TaskSummary` использует `previewRating?: Rating`, а `OwnerTask` — обязательное `previewRating: Rating`.
 
@@ -189,7 +190,53 @@ const confirmed = response.task.confirmedRevision === response.task.revision && 
 
 `questions` — текущая партия вопросов, `questionHistory` — архив вопросов, включая текущие. Повторный анализ не удаляет связь старых ответов с исходным вопросом. ID переиспользуется только при совпадении поля и текста; новая формулировка получает новый ID. `Question.sourceRevision` остаётся версией создания вопроса; при применении предложения используйте верхнеуровневый `sourceRevision` AI-ответа. Ответы из истории сохраняются и участвуют в сборке карточки. Эти данные доступны только владельцу.
 
-`answers` в PATCH заменяет весь массив ответов: сохраняйте предыдущие ответы и добавляйте изменённый ответ в конец массива. Так шаблонная сборка отдаёт приоритет последнему непропущенному ответу, если несколько вопросов относятся к одному полю. Максимум одного значения на `questionId`, длина ответа до 2000 символов; общий JSON-запрос ограничен 64 КБ.
+`answers` в PATCH заменяет весь массив ответов: сохраняйте предыдущие ответы и добавляйте изменённый ответ в конец массива. Оба режима используют последний непропущенный непустой ответ, если несколько вопросов относятся к одному полю; остальные ответы остаются в истории. Пропуск нового вопроса не удаляет предыдущий ответ на то же поле. Максимум одного значения на `questionId`, длина ответа до 2000 символов; общий JSON-запрос ограничен 64 КБ.
+
+### Сохранённое предложение и его источники
+
+```ts
+type Evidence = {
+  field: string; // путь из Card, например "data.source"
+  sourceId: string; // "draft", "answer:<questionId>" или "card:<field>"
+  quote: string; // точная цитата из источника на момент анализа
+};
+
+type LastAnalysis = {
+  operation: "analyze" | "compose";
+  sourceRevision: number;
+  generatedAt: string; // UTC ISO 8601
+  mode: "live" | "template";
+  questions: Question[];
+  proposal: Card;
+  warnings: string[];
+  evidence: Evidence[];
+  stale: boolean;
+};
+
+type AiResult = Omit<LastAnalysis, "mode"> & {
+  mode: "live" | "cached" | "template";
+};
+```
+
+`OwnerTask.lastAnalysis` — последний завершённый результат analyze или compose, в том числе шаблонный. До первого анализа он равен `null`. Сервер сохраняет результат отдельно от `workingCard`; генерация не увеличивает `revision` и не подтверждает сведения. Новый завершённый анализ заменяет предыдущий; ошибка 409/429 не стирает сохранённый результат.
+
+После обычного сохранения или применения предложения `lastAnalysis.stale` становится `true`, поскольку `sourceRevision !== task.revision`. Устаревший результат можно показывать для сравнения, но применять нельзя. Локальные несохранённые правки проверяйте отдельно через `dirty`. При повторном использовании кэша AI-ответ имеет `mode:"cached"`, а сохранённый результат — исходный `mode:"live"` и прежний `generatedAt`; повторного вызова модели нет. `AI_MODE=template` принудительно использует шаблон и не возвращает live-кэш.
+
+`evidence` описывает только новые значения, добавленные предложением. Сохранённым или защищённым полям AI-происхождение не приписывается. Цитата из `draft` относится к исходному описанию; `answer:<id>` — к ответу на вопрос из `questionHistory`; `card:<field>` — к сохранённому полю, использованному как источник другого поля. Цитаты сохраняются в снимке результата, поэтому их можно прочитать даже после изменения исходного текста. Совпадение цитаты с источником не доказывает правильность вывода AI: человек всё равно проверяет предлагаемое значение. В каталоге и публичной карточке эти данные не возвращаются.
+
+Подключение при открытии редактора:
+
+```ts
+const { task } = await api.getTask(taskId);
+setCard(task.workingCard);
+setQuestions(task.questions); // compose возвращает questions: [], но активные вопросы сохранены
+setAnswers(task.answers);
+setAiResult(task.lastAnalysis); // null скрывает блок предложения
+const canApply = !!task.lastAnalysis && !task.lastAnalysis.stale && !dirty;
+// У поля: lastAnalysis.evidence.find(item => item.field === "data.source")?.quote
+```
+
+Предложение не подставлять в редактируемую карточку при загрузке: пользователь применяет его отдельным PATCH с `sourceRevision`, как в примере ниже. После успешного PATCH показывайте возвращённый `task`, включая новый признак `lastAnalysis.stale`.
 
 `Application`: `{id,taskId,teamId,teamName,idea,plan,timeline,prototypeUrl,status,createdAt,decidedAt}`. Пример timeline — «2 недели»; prototypeUrl — ссылка http/https, не файл.
 
@@ -207,7 +254,7 @@ const confirmed = response.task.confirmedRevision === response.task.revision && 
 | `GET /api/tasks?scope=catalog&topic=education&level=ready` | фильтры необязательны; `limit/offset` необязательны | `{items:TaskSummary[],total}`; только опубликованные, сортировка `score DESC, publishedAt DESC` |
 | `GET /api/tasks/:id` | — | `{task:OwnerTask}` владельцу либо `{task:PublicTask}` команде |
 | `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?,sourceRevision?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision; `sourceRevision` передаётся при применении AI |
-| `POST /api/tasks/:id/analyze` | `{revision,mode:"analyze"|"compose"}` | `{sourceRevision,questions:Question[],proposal:Card,warnings:string[],mode:"live"|"cached"|"template"}`; AI предлагает, сам не сохраняет Card |
+| `POST /api/tasks/:id/analyze` | `{revision,mode:"analyze"|"compose"}` | `AiResult` (тип выше); предложение сохраняется в `lastAnalysis`, рабочий Card не меняется |
 | `POST /api/tasks/:id/confirm` | `{revision,confirmed:true}` | `{task:OwnerTask,rating:Rating}`; подтверждает текущий Card и пересчитывает баллы |
 | `POST /api/tasks/:id/publish` | `{revision}` | `{task:OwnerTask}`; требуется подтверждённая текущая версия, порога рейтинга нет |
 | `POST /api/tasks/:id/applications` | `{idea,plan,timeline,prototypeUrl,clientRequestId}` | 201 `{application:Application}`; предложение текущей команды |
@@ -234,7 +281,9 @@ const response = await api.patchTask(task.id, {
 // Показать response.task. При 409 сохранить локальный ввод и предложить обновить анализ.
 ```
 
-Без `sourceRevision` PATCH остаётся обычным ручным редактированием и может менять ранее заполненные поля. Если AI недоступен, тот же endpoint возвращает `mode:"template"`; UI честно показывает эту метку. Для защиты вручную очищенных полей и истории вопросов сервер автоматически добавляет служебные колонки SQLite при запуске; повторный seed не требуется.
+Без `sourceRevision` PATCH остаётся обычным ручным редактированием и может менять ранее заполненные поля. Если AI недоступен, тот же endpoint возвращает `mode:"template"`; UI честно показывает эту метку. Сервер автоматически добавляет служебные колонки SQLite для защищённых полей, истории вопросов и последнего предложения при запуске; повторный seed не требуется. Старые задачи получают `lastAnalysis:null` до следующего анализа.
+
+Исходное описание до 6000 символов целиком передаётся в live-запрос. Карточка не дублируется в источниках, а повторные ответы на одно поле заменяются актуальным. Полный запрос к AI, включая инструкции и схему, ограничен 64 КиБ; если накопленных данных больше, сервер возвращает шаблон и объяснение в `warnings`, сохраняя весь пользовательский ввод. Такая проверка выполняется до внешнего вызова и резервирования бюджета. Резерв стоимости остальных запросов учитывает фактический размер подготовленного запроса с запасом, а после ответа уточняется по usage.
 
 Пример изменения вложенного поля:
 

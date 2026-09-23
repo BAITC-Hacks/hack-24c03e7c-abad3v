@@ -47,6 +47,7 @@ db.exec(`
     scoring_version TEXT NOT NULL DEFAULT 'v1',
     publication_status TEXT NOT NULL DEFAULT 'draft' CHECK(publication_status IN ('draft','published')),
     analysis_cache_json TEXT NOT NULL DEFAULT '{}',
+    last_analysis_json TEXT,
     published_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -89,6 +90,7 @@ const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map((co
 for (const column of ['question_history_json', 'protected_fields_json']) {
   if (!taskColumns.has(column)) db.exec(`ALTER TABLE tasks ADD COLUMN ${column} TEXT NOT NULL DEFAULT '[]'`);
 }
+if (!taskColumns.has('last_analysis_json')) db.exec('ALTER TABLE tasks ADD COLUMN last_analysis_json TEXT');
 
 export const now = () => new Date().toISOString();
 export const encode = (value) => JSON.stringify(value);
@@ -120,6 +122,7 @@ export function questionHistoryFromRow(row) {
 export function taskFromRow(row) {
   if (!row) return null;
   const workingCard = decode(row.working_card_json);
+  const lastAnalysis = decode(row.last_analysis_json);
   return {
     id: row.id,
     draftText: row.draft_text,
@@ -130,6 +133,7 @@ export function taskFromRow(row) {
     questions: decode(row.questions_json),
     questionHistory: questionHistoryFromRow(row),
     answers: decode(row.answers_json),
+    lastAnalysis: lastAnalysis ? { ...lastAnalysis, stale: lastAnalysis.sourceRevision !== row.revision } : null,
     revision: row.revision,
     confirmedRevision: row.confirmed_revision,
     publicationStatus: row.publication_status,

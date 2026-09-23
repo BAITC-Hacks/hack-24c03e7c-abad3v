@@ -19,7 +19,7 @@ test('existing SQLite tasks survive the additive migration and repeated startup'
       encode([{ questionId: 'old-question', value: 'Тестовая таблица', skipped: false }]), 'legacy-task'
     );
     // Reproduce the previous schema with a real task and saved answer.
-    db.exec('ALTER TABLE tasks DROP COLUMN question_history_json; ALTER TABLE tasks DROP COLUMN protected_fields_json;');
+    db.exec('ALTER TABLE tasks DROP COLUMN question_history_json; ALTER TABLE tasks DROP COLUMN protected_fields_json; ALTER TABLE tasks DROP COLUMN last_analysis_json;');
     console.log(JSON.stringify(db.prepare('SELECT * FROM tasks WHERE id=?').get('legacy-task')));
     db.close();
   `));
@@ -31,11 +31,28 @@ test('existing SQLite tasks survive the additive migration and repeated startup'
     db.close();
   `;
   const first = JSON.parse(run(inspect));
-  const { question_history_json, protected_fields_json, ...preserved } = first.row;
+  const { question_history_json, protected_fields_json, last_analysis_json, ...preserved } = first.row;
   assert.deepEqual(preserved, original);
   assert.equal(question_history_json, '[]');
   assert.equal(protected_fields_json, '[]');
+  assert.equal(last_analysis_json, null);
+  assert.equal(first.task.lastAnalysis, null);
   assert.deepEqual(first.task.questionHistory, JSON.parse(original.questions_json));
   assert.deepEqual(first.task.answers, JSON.parse(original.answers_json));
   assert.deepEqual(JSON.parse(run(inspect)), first);
+
+  // A completed proposal survives separate processes, not just a second HTTP GET.
+  const analysis = { operation: 'compose', sourceRevision: 7, generatedAt: '2026-09-23T10:00:00.000Z', mode: 'template', questions: [], proposal: first.task.workingCard, warnings: ['Проверьте данные.'], evidence: [] };
+  run(`
+    const { db } = await import(process.argv[1]);
+    db.prepare('UPDATE tasks SET last_analysis_json=? WHERE id=?').run(${JSON.stringify(JSON.stringify(analysis))}, 'legacy-task');
+    db.close();
+  `);
+  assert.deepEqual(JSON.parse(run(inspect)).task.lastAnalysis, { ...analysis, stale: false });
+  run(`
+    const { db } = await import(process.argv[1]);
+    db.prepare('UPDATE tasks SET revision=8 WHERE id=?').run('legacy-task');
+    db.close();
+  `);
+  assert.deepEqual(JSON.parse(run(inspect)).task.lastAnalysis, { ...analysis, stale: true });
 });
