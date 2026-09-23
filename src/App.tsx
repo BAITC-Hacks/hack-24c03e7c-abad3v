@@ -5,6 +5,7 @@ import { Icon, EmptyState } from './ui'
 import { BusinessWorkspace, CatalogPage, ApplicationsPage } from './WorkspacePages'
 import { TaskEditor } from './TaskEditor'
 import { readLocal, writeLocal } from './editorModel'
+import { ProfileSwitcher } from './ProfileSwitcher'
 
 function readRoute() {
   const [path, query = ''] = window.location.hash.replace(/^#\/?/, '').split('?')
@@ -67,7 +68,7 @@ export default function App() {
     <header className="app-header"><div className="header-inner">
       <a className="brand" onClick={event => { event.preventDefault(); void navigate(business ? 'workspace' : 'catalog') }} href={business ? '#/workspace' : '#/catalog'} aria-label="AI Sana — главная"><span className="brand-symbol"><Icon name="sparkle" size={23} /></span><span>AI Sana</span></a>
       <nav className="header-nav" aria-label="Главная навигация">{nav.map(item => <button key={item.id} className={(page === item.id || item.id === 'workspace' && editor) ? 'active' : ''} onClick={() => void navigate(item.id)}><Icon name={item.icon} size={18} /><span>{item.label}</span>{item.id === 'applications' && business && pending > 0 && <span className="nav-count">{pending}</span>}</button>)}</nav>
-      <div className="profile-switch"><span className="profile-avatar">{actor.name.slice(0, 1)}</span><label htmlFor="actor-switcher"><span>{business ? 'Бизнес' : 'Команда'} · демо-профиль</span><select id="actor-switcher" aria-label="Профиль" value={actor.id} disabled={busy} onChange={event => void changeActor(event.target.value)}><optgroup label="Бизнес">{actors.filter(item => item.kind === 'business').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</optgroup><optgroup label="Студенческие команды">{actors.filter(item => item.kind === 'team').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</optgroup></select></label></div>
+      <ProfileSwitcher actor={actor} actors={actors} busy={busy} onChange={changeActor} />
     </div></header>
     <main className="main-area" inert={busy}>
       {page === 'workspace' && <BusinessWorkspace tasks={tasks} busy={busy} loading={tasksLoading} error={tasksError} onRetry={() => void loadTasks()} onCreate={() => navigate('new')} onOpen={id => navigate(`tasks/${id}`)} onApplications={() => navigate('applications')} />}
