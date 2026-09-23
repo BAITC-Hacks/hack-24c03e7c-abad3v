@@ -1,3 +1,5 @@
+import { normalizeTopic } from './topics.js';
+
 // Portable CSV reader shared by the Node seed and Vite's offline demo.
 export function parseCsv(input) {
   const text = input.replace(/^\uFEFF/, '');
@@ -37,7 +39,6 @@ const groups = [
   ['users', 'Пользователи', 10, ['users']],
   ['contact', 'Связь с бизнесом', 10, ['contact.channel', 'contact.consultation', 'contact.feedback']],
 ];
-const topics = ['education', 'career', 'operations', 'analytics', 'other'];
 const optional = (value) => value?.trim() || null;
 const list = (value) => value.split('|').map((item) => item.trim()).filter(Boolean);
 const required = (value, label) => { if (!value?.trim()) throw new Error(`Демо CSV: отсутствует ${label}`); return value.trim(); };
@@ -81,7 +82,8 @@ export function loadDemoData(csv, timestamp = new Date().toISOString()) {
   const tasks = taskRows.map((source) => {
     const row = cardsById.get(source.id);
     if (!row) throw new Error(`cards.csv: нет карточки ${source.id}`);
-    if (row.topic !== source.topic || row.industry !== source.industry || row.isSynthetic !== source.isSynthetic) throw new Error(`Демо CSV: сведения tasks/cards расходятся для ${row.id}`);
+    const topic = normalizeTopic(required(source.topic, `${source.id}.topic`));
+    if (normalizeTopic(required(row.topic, `${row.id}.topic`)) !== topic || row.industry !== source.industry || row.isSynthetic !== source.isSynthetic) throw new Error(`Демо CSV: сведения tasks/cards расходятся для ${row.id}`);
     const card = {
       title: optional(row.title), context: optional(row.context), need: optional(row.need), users: optional(row.users),
       data: { availability: choice(row.dataAvailability, ['available', 'planned', 'unavailable'], 'dataAvailability', true), source: optional(row.dataSource) },
@@ -107,10 +109,10 @@ export function loadDemoData(csv, timestamp = new Date().toISOString()) {
     const confirmedRevision = confirmed ? integer(row.confirmedRevision, `${row.id}.confirmedRevision`, 1, revision) : null;
     if (published && (!confirmed || !card.title)) throw new Error(`Демо CSV: опубликованная задача ${row.id} должна быть подтверждена и иметь название`);
     return {
-      id: row.id, businessId: 'business-demo', draftText: required(source.draftText, `${row.id}.draftText`), topic: choice(row.topic, topics, 'topic'),
+      id: row.id, businessId: 'business-demo', draftText: required(source.draftText, `${row.id}.draftText`), topic,
       industry: source.industry, completeness: source.completeness, isSynthetic: bool(source.isSynthetic, `${row.id}.isSynthetic`),
-      workingCard: card, confirmedCard: confirmed ? structuredClone(card) : null, confirmedTopic: confirmed ? row.topic : null,
-      publishedCard: published ? structuredClone(card) : null, publishedTopic: published ? row.topic : null,
+      workingCard: card, confirmedCard: confirmed ? structuredClone(card) : null, confirmedTopic: confirmed ? topic : null,
+      publishedCard: published ? structuredClone(card) : null, publishedTopic: published ? topic : null,
       revision, confirmedRevision, publishedRevision: published ? confirmedRevision : null, publicationStatus,
       rating, previewRating: structuredClone(rating), publishedRating: published ? structuredClone(rating) : null,
       hasUnpublishedChanges: published && revision !== confirmedRevision, aiResult: null, questions: [], answers: [], manualFields: [],

@@ -3,8 +3,8 @@ import { api, errorMessage } from './api'
 import { distinctTaskText } from './listPages'
 import { labelForTopic } from './fixtures'
 import { fieldLabel } from './editorModel'
-import type { Actor, Application, Level, PublicTask, Role, Status, TaskSummary, Topic } from './types'
-import { Badge, EmptyState, Icon, levelName, levelOptions, levelTone, PrimaryButton, RatingMeter, SecondaryButton, StatusBadge, topicOptions } from './ui'
+import type { Actor, Application, Level, PublicTask, Role, Status, TaskSummary } from './types'
+import { Badge, EmptyState, Icon, levelName, levelOptions, levelTone, PrimaryButton, RatingMeter, SecondaryButton, StatusBadge } from './ui'
 import './pages.css'
 
 const dateFormat = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' })
@@ -12,6 +12,8 @@ const formatDate = (value?: string | null) => value && !Number.isNaN(Date.parse(
 const dataLabel = (value?: string | null) => value === 'available' ? 'Данные доступны' : value === 'planned' ? 'Данные готовятся' : value === 'unavailable' ? 'Данных пока нет' : 'Данные не уточнены'
 const deadlineLabel = (value?: string | null) => value === 'flexible' ? 'Гибкий срок' : value ? formatDate(value) || value : 'Срок не уточнён'
 const displayTitle = (task: TaskSummary) => task.title && task.title !== 'Новая задача' ? task.title : task.need || 'Задача в работе'
+const catalogTopicLabel = (topic: TaskSummary['topic']) => labelForTopic(topic).trim().replace(/\s+/g, ' ')
+const catalogTopicKey = (topic: TaskSummary['topic']) => catalogTopicLabel(topic).normalize('NFKC').toLocaleLowerCase('ru-RU')
 const prototypeLink = (value: string | null) => {
   try { const parsed = new URL(value || ''); return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : null } catch { return null }
 }
@@ -63,7 +65,7 @@ export function BusinessWorkspace({ tasks, busy, onCreate, onOpen, onApplication
 
 export function CatalogPage({ onToast }: { onToast: (message: string) => void }) {
   const [items, setItems] = useState<TaskSummary[]>([])
-  const [topic, setTopic] = useState<Topic | ''>('')
+  const [topic, setTopic] = useState('')
   const [level, setLevel] = useState<Level | ''>('')
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -74,11 +76,16 @@ export function CatalogPage({ onToast }: { onToast: (message: string) => void })
   const [requestedId, setRequestedId] = useState<string | null>(() => new URLSearchParams(window.location.hash.split('?')[1] || '').get('task'))
 
   useEffect(() => {
+    if (requestedId) return
     let cancelled = false
     setLoading(true); setError('')
-    void api.listTasks({ scope: 'catalog', topic: topic || undefined, level: level || undefined }).then((response) => { if (!cancelled) setItems(response.items) }).catch((exception: unknown) => { if (!cancelled) setError(errorMessage(exception)) }).finally(() => { if (!cancelled) setLoading(false) })
+    void api.listTasks({ scope: 'catalog' }).then((response) => {
+      if (cancelled) return
+      setItems(response.items)
+      setTopic((current) => current && !response.items.some((task) => catalogTopicKey(task.topic) === current) ? '' : current)
+    }).catch((exception: unknown) => { if (!cancelled) setError(errorMessage(exception)) }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [topic, level, retry])
+  }, [retry, requestedId])
   useEffect(() => {
     const syncSelection = () => setRequestedId(new URLSearchParams(window.location.hash.split('?')[1] || '').get('task'))
     window.addEventListener('hashchange', syncSelection)
@@ -93,13 +100,20 @@ export function CatalogPage({ onToast }: { onToast: (message: string) => void })
   }, [requestedId, retry])
   const openTask = (id: string) => { setRequestedId(id); window.location.hash = `/catalog?task=${encodeURIComponent(id)}`; window.scrollTo(0, 0) }
   const closeTask = () => { setRequestedId(null); setSelected(null); window.location.hash = '/catalog' }
-  const filtered = items.filter((task) => `${task.title} ${task.need || ''} ${task.result || ''} ${labelForTopic(task.topic)}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()))
+  const topicLabels = new Map<string, string>()
+  for (const task of items) {
+    const key = catalogTopicKey(task.topic)
+    if (key && !topicLabels.has(key)) topicLabels.set(key, catalogTopicLabel(task.topic))
+  }
+  const availableTopics = Array.from(topicLabels, ([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, 'ru-RU'))
+  const query = search.trim().toLocaleLowerCase()
+  const filtered = items.filter((task) => (!topic || catalogTopicKey(task.topic) === topic) && (!level || task.rating.level === level) && `${task.title} ${task.need || ''} ${task.result || ''} ${labelForTopic(task.topic)}`.toLocaleLowerCase().includes(query))
 
   if (requestedId) return selected ? <PublicTaskPage key={selected.id} task={selected} onBack={closeTask} onToast={onToast} /> : <div className="page-content public-task-page"><button className="page-back-link" onClick={closeTask}><Icon name="arrow" size={17} />К каталогу</button>{detailError ? <RequestError message={detailError} onRetry={() => setRetry((value) => value + 1)} /> : <PageLoading>Открываем задачу…</PageLoading>}</div>
 
   return <div className="page-content task-catalog-page">
-    <PageHeading title="Каталог задач" subtitle="Изучите запросы бизнеса и предложите решение от своей команды." />
-    <div className="catalog-toolbar"><label className="page-search"><Icon name="search" size={20} /><input aria-label="Поиск по задачам" placeholder="Название, проблема или результат" value={search} onChange={(event) => setSearch(event.target.value)} /></label><label className="catalog-filter"><span>Направление</span><select value={topic} onChange={(event) => setTopic(event.target.value as Topic | '')}><option value="">Все направления</option>{topicOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label className="catalog-filter"><span>Готовность</span><select value={level} onChange={(event) => setLevel(event.target.value as Level | '')}><option value="">Любая готовность</option>{levelOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label></div>
+    <PageHeading title="Каталог задач" subtitle="Изучите запросы бизнеса и предложите решение от своей команды." action={<SecondaryButton disabled={loading} onClick={() => setRetry((value) => value + 1)}>Обновить</SecondaryButton>} />
+    <div className="catalog-toolbar"><label className="page-search"><Icon name="search" size={20} /><input aria-label="Поиск по задачам" placeholder="Название, тема или описание" value={search} onChange={(event) => setSearch(event.target.value)} /></label><label className="catalog-filter"><span>Направление</span><select value={topic} onChange={(event) => setTopic(event.target.value)}><option value="">Все направления</option>{availableTopics.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label className="catalog-filter"><span>Готовность</span><select value={level} onChange={(event) => setLevel(event.target.value as Level | '')}><option value="">Любая готовность</option>{levelOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label></div>
     <div className="catalog-results-heading"><span>{loading ? 'Загружаем задачи…' : `Найдено задач: ${filtered.length}`}</span><span>Сначала с высокой готовностью</span></div>
     {error ? <RequestError message={error} onRetry={() => setRetry((value) => value + 1)} /> : loading ? <PageLoading>Загружаем опубликованные задачи…</PageLoading> : !filtered.length ? <EmptyState icon="search" title="Подходящих задач пока нет" text="Попробуйте изменить запрос или фильтры." action={<SecondaryButton onClick={() => { setSearch(''); setTopic(''); setLevel('') }}>Сбросить фильтры</SecondaryButton>} /> : <div className="project-catalog-grid">{filtered.map((task) => <article className="project-catalog-card" key={task.id}><div className="project-card-top"><span>{labelForTopic(task.topic)}</span><Badge tone={levelTone(task.rating.level)}>{levelName[task.rating.level]}</Badge></div><h2><button onClick={() => openTask(task.id)}>{task.title}</button></h2><p className="project-need">{task.need || 'Потребность пока не уточнена.'}</p><div className="project-result"><h3>Ожидаемый результат</h3><p>{task.result || 'Ожидаемый результат ещё не указан.'}</p></div><dl className="project-facts"><div><dt>Данные</dt><dd>{dataLabel(task.dataAvailability)}</dd></div><div><dt>Срок</dt><dd>{deadlineLabel(task.deadline)}</dd></div></dl><div className="project-card-bottom"><span><strong>{task.rating.score}/100</strong> полнота описания</span><SecondaryButton icon="arrow" onClick={() => openTask(task.id)}>Подробнее</SecondaryButton></div></article>)}</div>}
   </div>

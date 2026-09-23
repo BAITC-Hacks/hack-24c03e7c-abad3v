@@ -1,4 +1,4 @@
-export type Topic = 'education' | 'career' | 'operations' | 'analytics' | 'other'
+export type Topic = string
 export type Level = 'needs_clarification' | 'workable' | 'ready' | 'priority'
 export type Role = 'business' | 'team'
 export type Status = 'pending' | 'selected' | 'rejected'
@@ -46,6 +46,7 @@ export type Actor = { id: string; kind: Role; name: string; profile: string | Re
 export type Evidence = { field: string; sourceId: string; quote: string }
 export type AiResult = {
   sourceRevision: number; questions: Question[]; proposal: Card; warnings: string[]; mode: 'live' | 'cached' | 'template'; evidence?: Evidence[]
+  suggestedTopic?: string | null
   originMode?: 'live' | 'template'; operation?: 'analyze' | 'compose'; generatedAt?: string; stale?: boolean
   inputSnapshot?: { draftText: string; topic: Topic; answers: Answer[]; manualFields: string[] }
 }

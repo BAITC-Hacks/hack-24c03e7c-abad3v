@@ -16,11 +16,13 @@ const systemPrompt = `Ты помогаешь бизнесу описать уч
 Для data.availability используй только значения available, planned, unavailable; для constraints.deadlineMode — fixed, flexible. Для contact.channel и constraints.deadlineDate возвращай options: []; эти сведения пользователь вводит сам.
 В обоих режимах используй исходное описание и сохранённые ответы, включая ответы на предыдущие вопросы.
 Заполняй только пустые поля. Не заполняй поля из filledFields и protectedFields; их текущие значения уже сохранены пользователем.
+В suggestedTopic предложи краткую понятную тему задачи для поиска: обычно 2–4 слова, до 80 символов, по описанию и актуальным ответам. Это свободное направление, а не выбор из education, career, operations, analytics или other; например, «Управление помещениями», «Учёт оборудования» или «Медицинские сервисы». Обобщай содержание для группировки похожих задач, не повторяй полное название задания, имена организаций и конкретные числовые цели.
+Не выдумывай предмет задачи. Если описание не позволяет определить осмысленную тему или protectedFields содержит topic, верни suggestedTopic: null. Тема не входит в facts и не заменяет ни одно поле карточки.
 В режиме compose собери цельную карточку из описания и ответов; вопросы могут отсутствовать.
 Не считай рейтинг, не публикуй задачу и не выбирай команду.
 Отвечай на русском и только по переданной JSON Schema.`;
 
-export const AI_PROMPT_VERSION = 'v5-guided-answers';
+export const AI_PROMPT_VERSION = 'v6-free-topics';
 export const AI_REQUEST_MAX_BYTES = 64 * 1024;
 export const MODEL_PRICES = {
   'gpt-6-sol': { input: 2, output: 10 },
@@ -30,6 +32,7 @@ export const MODEL_PRICES = {
 const schema = {
   type: 'object',
   properties: {
+    suggestedTopic: { type: ['string', 'null'], minLength: 1, maxLength: 80 },
     facts: { type: 'array', items: { type: 'object', properties: {
       field: { type: 'string', enum: CARD_PATHS },
       value: { type: ['string', 'null'] },
@@ -48,11 +51,12 @@ const schema = {
     }, required: ['id', 'field', 'text', 'options'], additionalProperties: false } },
     warnings: { type: 'array', items: { type: 'string' } },
   },
-  required: ['facts', 'missingFields', 'questions', 'warnings'],
+  required: ['suggestedTopic', 'facts', 'missingFields', 'questions', 'warnings'],
   additionalProperties: false,
 };
 
 const responseSchema = z.object({
+  suggestedTopic: z.string().transform((value) => value.trim().replace(/\s+/gu, ' ')).pipe(z.string().min(1).max(80)).nullable().optional().default(null),
   facts: z.array(z.object({ field: z.enum(CARD_PATHS), value: z.string().nullable(), sourceId: z.string(), quote: z.string().nullable() }).strict()).max(30),
   missingFields: z.array(z.enum(CARD_PATHS)).max(CARD_PATHS.length),
   questions: z.array(z.object({
@@ -140,7 +144,7 @@ export async function liveResult(task, mode, { prepared = prepareLiveRequest(tas
     result: { questions: parsed.questions.map((question) => ({
       id: `q:${question.field}`, field: question.field, text: question.text,
       options: normalizeQuestionOptions(question, task, question.options),
-    })), proposal, evidence, warnings: parsed.warnings },
+    })), proposal, suggestedTopic: protectedPaths(task).has('topic') ? null : parsed.suggestedTopic, evidence, warnings: parsed.warnings },
     usage: { model: request.model, requestId: response.id, inputTokens: response.usage?.input_tokens ?? null, outputTokens: response.usage?.output_tokens ?? null, durationMs: Date.now() - started },
   };
 }

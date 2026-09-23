@@ -1,6 +1,7 @@
 import { actors, applications, blankCard, datasetVersion, labelForTopic, tasks } from './fixtures'
 import { hasMeaningfulValue } from '../shared/card-values.js'
 import { normalizeQuestionOptions } from '../shared/question-options.js'
+import { inferTopic, normalizeTopic } from '../shared/topics.js'
 import type { AiResult, Answer, Application, Card, Level, OwnerTask, PublicTask, Rating, TaskSummary, Topic } from './types'
 
 type Evidence = { field: string; sourceId: string; quote: string }
@@ -194,6 +195,13 @@ function requireTask(id: string) {
 function requireRevision(task: StoredTask, revision: number) {
   if (task.revision !== revision) throw { status: 409, error: { code: 'REVISION_CONFLICT', message: 'Задача изменилась. Загрузите актуальную версию.' } }
 }
+function requireTopic(value: unknown): Topic {
+  try {
+    const topic = normalizeTopic(value)
+    if (topic) return topic
+  } catch { /* Use the same validation response as the backend. */ }
+  throw { status: 422, error: { code: 'VALIDATION_ERROR', message: 'Укажите тему от 1 до 80 символов.' } }
+}
 function summarize(task: StoredTask, published = false): TaskSummary {
   const card = published ? task.publishedCard! : task.workingCard
   const rating = published ? task.publishedRating || scoreCard(card) : task.rating
@@ -309,6 +317,7 @@ function templateResult(task: StoredTask, mode: 'analyze' | 'compose'): AiResult
   const questions = mode === 'compose' ? structuredClone(task.questions) : priorities.filter((field) => !filled(fieldValue(proposal, field))).slice(0, 5).map((field) => withQuestionOptions({ id: `q:${field}`, field, text: questionText[field], sourceRevision: task.revision }, task))
   return {
     sourceRevision: task.revision, questions, proposal, evidence, warnings: [], mode: 'template', originMode: 'template', operation: mode, generatedAt: new Date().toISOString(), stale: false,
+    suggestedTopic: inferTopic(task),
     inputSnapshot: structuredClone({ draftText: task.draftText, topic: task.topic, answers: task.answers, manualFields: task.manualFields || [] }),
   }
 }
@@ -341,13 +350,14 @@ export const mockApi = {
     const publicTask: PublicTask = { id: task.id, topic: task.publishedTopic || task.topic, card: task.publishedCard, rating: task.publishedRating || scoreCard(task.publishedCard), publicationStatus: 'published', publishedAt: task.publishedAt }
     return wait({ task: publicTask })
   },
-  async createTask(input: { draftText: string; topic: Topic }) {
+  async createTask(input: { draftText: string; topic?: Topic }) {
     requireBusiness()
     if (input.draftText.trim().length < 10) throw { status: 422, error: { code: 'VALIDATION_ERROR', message: 'Опишите задачу хотя бы в одном коротком предложении.' } }
+    const topic = input.topic === undefined ? 'other' : requireTopic(input.topic)
     const timestamp = new Date().toISOString()
     const card = blankCard()
     const task: StoredTask = {
-      id: `task-${nextTask++}`, businessId: activeActor.id, draftText: input.draftText.trim(), topic: input.topic, workingCard: card, confirmedCard: null,
+      id: `task-${nextTask++}`, businessId: activeActor.id, draftText: input.draftText.trim(), topic, workingCard: card, confirmedCard: null,
       questions: [], questionHistory: [], answers: [], revision: 1, confirmedRevision: null, publicationStatus: 'draft', rating: scoreCard(card),
       publishedCard: null, publishedRating: null, publishedRevision: null, aiResult: null, manualFields: [],
       publishedAt: null, createdAt: timestamp, updatedAt: timestamp,
@@ -361,8 +371,9 @@ export const mockApi = {
     requireBusiness()
     const task = requireTask(id)
     requireRevision(task, body.revision)
+    const topic = body.topic === undefined ? undefined : requireTopic(body.topic)
     if (body.draftText !== undefined) task.draftText = body.draftText
-    if (body.topic !== undefined) task.topic = body.topic
+    if (topic !== undefined) task.topic = topic
     if (body.cardPatch) task.workingCard = mergeCard(task.workingCard, body.cardPatch)
     if (body.answers !== undefined) {
       const submitted = new Set(body.answers.map((answer) => answer.questionId))

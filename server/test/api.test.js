@@ -37,7 +37,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(business.status, 200);
     const businessCookie = business.cookie;
 
-    const invalid = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: { draftText: 'Черновик', topic: 'unknown' } });
+    const invalid = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: { draftText: 'Черновик', topic: ' ' } });
     assert.equal(invalid.status, 422);
     assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
 

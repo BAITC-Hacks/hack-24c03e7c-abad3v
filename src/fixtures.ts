@@ -3,7 +3,8 @@ import profilesCsv from '../demo/profiles.csv?raw'
 import tasksCsv from '../demo/tasks.csv?raw'
 import cardsCsv from '../demo/cards.csv?raw'
 import applicationsCsv from '../demo/applications.csv?raw'
-import type { Card, Topic } from './types'
+import type { Card } from './types'
+export { labelForTopic } from '../shared/topics.js'
 
 // Use file content only, so refreshes do not reset local edits for an unchanged data set.
 export const datasetVersion = (() => {
@@ -26,4 +27,3 @@ export const blankCard = (): Card => ({
 })
 
 export const teams = actors.filter((actor) => actor.kind === 'team')
-export const labelForTopic = (topic: Topic) => ({ education: 'Образование', career: 'Карьера', operations: 'Операции', analytics: 'Аналитика', other: 'Другое' })[topic]

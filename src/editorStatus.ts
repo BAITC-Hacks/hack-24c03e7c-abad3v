@@ -17,7 +17,9 @@ export function aiNeedsRefresh(form: EditorForm, task: OwnerTask, result: AiResu
     const answers = (items: EditorForm['answers']) => JSON.stringify(items
       .map(item => ({ id: item.questionId, value: item.skipped ? null : normalizeKnownValue(item.value), skipped: item.skipped }))
       .sort((a, b) => a.id.localeCompare(b.id)))
-    if (form.draftText.trim() !== snapshot.draftText.trim() || form.topic !== snapshot.topic
+    const appliedTopic = result.suggestedTopic !== undefined && !form.manualFields.includes('topic')
+      && form.topic === (result.suggestedTopic?.trim() || 'other')
+    if (form.draftText.trim() !== snapshot.draftText.trim() || (form.topic !== snapshot.topic && !appliedTopic)
       || answers(form.answers) !== answers(snapshot.answers)
       || JSON.stringify([...form.manualFields].sort()) !== JSON.stringify([...snapshot.manualFields].sort())) return true
     // Applying this proposal increments the task revision, but does not make the analysis outdated.

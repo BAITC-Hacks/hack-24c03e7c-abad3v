@@ -274,7 +274,7 @@ export function ensureDemoActors() {
 
 ensureDemoActors();
 
-export function newTaskRow({ id, businessId, draftText, topic }) {
+export function newTaskRow({ id, businessId, draftText, topic = 'other' }) {
   const card = emptyCard();
   const rating = scoreCard(card);
   const timestamp = now();
