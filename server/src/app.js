@@ -4,8 +4,8 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z, ZodError } from 'zod';
-import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, mergeCard, scoreCard, validatePublishable } from './card.js';
-import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
+import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, getField, setField, mergeCard, scoreCard, validatePublishable } from './card.js';
+import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, questionHistoryFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
 import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, templateResult } from './ai.js';
 
 export const app = express();
@@ -141,28 +141,53 @@ app.get('/api/tasks/:id', wrap((req, res) => {
 app.patch('/api/tasks/:id', wrap((req, res) => {
   const body = parse(z.object({
     revision: z.number().int().min(1),
+    sourceRevision: z.number().int().min(1).optional(),
     draftText: z.string().trim().min(1).max(6000).optional(),
     topic: z.enum(TOPICS).optional(),
     cardPatch: z.record(z.string(), z.unknown()).optional(),
     manualFields: z.array(z.enum(CARD_PATHS)).max(CARD_PATHS.length).optional(),
-    answers: z.array(z.object({ questionId: z.string(), value: z.string().max(2000).nullable(), skipped: z.boolean() }).strict()).max(20).optional(),
+    answers: z.array(z.object({ questionId: z.string(), value: z.string().max(2000).nullable(), skipped: z.boolean() }).strict()).optional(),
   }).strict(), jsonFields(req));
   if (body.draftText === undefined && body.topic === undefined && body.cardPatch === undefined && body.answers === undefined && body.manualFields === undefined) fail(422, 'VALIDATION_ERROR', 'Укажите изменения');
   const row = ownerTask(req, req.params.id);
   checkRevision(row, body.revision);
-  const card = body.cardPatch ? mergeCard(decode(row.working_card_json), body.cardPatch) : decode(row.working_card_json);
+  if (body.sourceRevision !== undefined) {
+    checkRevision(row, body.sourceRevision);
+    if (!body.cardPatch || body.draftText !== undefined || body.topic !== undefined || body.answers !== undefined) {
+      fail(422, 'VALIDATION_ERROR', 'Применяйте предложение отдельно: revision, sourceRevision и cardPatch');
+    }
+  }
+  const currentCard = decode(row.working_card_json);
+  const protectedFields = new Set(body.manualFields ?? taskFromRow(row).manualFields);
+  const card = body.cardPatch ? mergeCard(currentCard, body.cardPatch) : currentCard;
+  if (body.sourceRevision !== undefined) {
+    for (const path of CARD_PATHS) {
+      if (protectedFields.has(path) || getField(currentCard, path) !== null) setField(card, path, getField(currentCard, path));
+    }
+  }
+  // Legacy clients do not distinguish accepted suggestions from manual edits.
+  // The new editor always sends the explicit manualFields list, including [].
+  if (body.manualFields === undefined) {
+    for (const path of CARD_PATHS) {
+      if (getField(card, path) !== getField(currentCard, path)) protectedFields.add(path);
+    }
+  }
+  const knownQuestions = questionHistoryFromRow(row);
   const incomingAnswers = body.answers?.map((answer) => {
     if (answer.skipped && answer.value) fail(422, 'VALIDATION_ERROR', 'Пропущенный вопрос не должен содержать ответ');
-    if (!decode(row.questions_json).some((q) => q.id === answer.questionId)) fail(422, 'VALIDATION_ERROR', 'Неизвестный вопрос');
+    if (!knownQuestions.some((q) => q.id === answer.questionId)) fail(422, 'VALIDATION_ERROR', 'Неизвестный вопрос');
     return { questionId: answer.questionId, value: answer.skipped ? null : cleanText(answer.value, 2000), skipped: answer.skipped };
   });
   if (incomingAnswers && new Set(incomingAnswers.map((answer) => answer.questionId)).size !== incomingAnswers.length) fail(422, 'VALIDATION_ERROR', 'Повторяющийся вопрос');
   const answersById = new Map(decode(row.answers_json).map((answer) => [answer.questionId, answer]));
-  for (const answer of incomingAnswers ?? []) answersById.set(answer.questionId, answer);
+  for (const answer of incomingAnswers ?? []) {
+    answersById.delete(answer.questionId);
+    answersById.set(answer.questionId, answer);
+  }
   const answers = [...answersById.values()];
   const timestamp = now();
-  db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,manual_fields_json=?,revision=revision+1,updated_at=? WHERE id=?`)
-    .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), encode(body.manualFields === undefined ? decode(row.manual_fields_json) : [...new Set(body.manualFields)]), timestamp, row.id);
+  db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,manual_fields_json=?,protected_fields_json=?,revision=revision+1,updated_at=? WHERE id=?`)
+    .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), encode([...protectedFields]), encode([...protectedFields]), timestamp, row.id);
   const next = getTask(row.id);
   res.json({ task: taskFromRow(next), previewRating: scoreCard(card) });
 }));
@@ -210,7 +235,8 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   const row = ownerTask(req, req.params.id);
   checkRevision(row, body.revision);
   const task = taskFromRow(row);
-  const hash = createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode: body.mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, answers: task.answers, ...(body.mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
+  const answerQuestions = task.questionHistory.filter((question) => task.answers.some((answer) => answer.questionId === question.id));
+  const hash = createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode: body.mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, manualFields: task.manualFields, answers: task.answers, answerQuestions, ...(body.mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
   const cache = decode(row.analysis_cache_json);
   if (cache[body.mode]?.hash === hash) {
     const result = { ...cache[body.mode].result, sourceRevision: row.revision, mode: cache[body.mode].result.mode === 'template' ? 'template' : 'cached' };
@@ -249,9 +275,13 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   if (!result) result = templateResult(task, body.mode);
   const latest = getTask(row.id);
   if (latest.revision !== row.revision) fail(409, 'REVISION_CONFLICT', 'Задача изменилась во время AI-запроса');
-  const questions = body.mode === 'analyze' ? result.questions.map((q) => ({ ...q, id: task.questions.find((previous) => previous.field === q.field)?.id ?? `q:${q.field}`, sourceRevision: row.revision })) : task.questions;
+  const questions = body.mode === 'analyze' ? result.questions.map((q) => {
+    const previous = task.questionHistory.find((item) => item.field === q.field && item.text === q.text)
+      ?? task.questionHistory.find((item) => item.field === q.field);
+    return { ...q, id: previous?.id ?? `q:${q.field}`, sourceRevision: previous?.sourceRevision ?? row.revision };
+  }) : task.questions;
   // Keep source questions for saved answers even when a later analysis asks about new gaps.
-  const allQuestions = [...task.questions];
+  const allQuestions = [...task.questionHistory];
   for (const question of questions) {
     const index = allQuestions.findIndex((previous) => previous.id === question.id);
     if (index < 0) allQuestions.push(question);
@@ -259,8 +289,8 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   }
   const payload = { questions, proposal: result.proposal, warnings: result.warnings, evidence: result.evidence, sourceRevision: row.revision, mode };
   cache[body.mode] = { hash, result: payload };
-  db.prepare('UPDATE tasks SET questions_json=?,analysis_cache_json=?,ai_result_json=? WHERE id=?')
-    .run(encode(allQuestions), encode(cache), encode(payload), row.id);
+  db.prepare('UPDATE tasks SET questions_json=?,question_history_json=?,analysis_cache_json=?,ai_result_json=? WHERE id=?')
+    .run(encode(allQuestions), encode(allQuestions), encode(cache), encode(payload), row.id);
   res.json(payload);
 }));
 

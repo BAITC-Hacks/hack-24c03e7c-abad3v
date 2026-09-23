@@ -92,6 +92,8 @@ for (const [name, definition] of Object.entries({
   published_score: 'INTEGER NOT NULL DEFAULT 0',
   ai_result_json: 'TEXT',
   manual_fields_json: "TEXT NOT NULL DEFAULT '[]'",
+  question_history_json: "TEXT NOT NULL DEFAULT '[]'",
+  protected_fields_json: "TEXT NOT NULL DEFAULT '[]'",
 })) {
   if (!taskColumns.has(name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
 }
@@ -123,6 +125,11 @@ export function actorFromRow(row) {
   return { id: row.id, kind: row.kind, name: row.name, profile: decode(row.profile_json) };
 }
 
+export function questionHistoryFromRow(row) {
+  return [...new Map([...decode(row.question_history_json), ...decode(row.questions_json)]
+    .map((question) => [question.id, question])).values()];
+}
+
 export function taskFromRow(row) {
   if (!row) return null;
   return {
@@ -136,8 +143,9 @@ export function taskFromRow(row) {
     hasUnpublishedChanges: row.publication_status === 'published' && row.published_revision !== row.revision,
     previewRating: scoreCard(decode(row.working_card_json)),
     aiResult: decode(row.ai_result_json),
-    manualFields: decode(row.manual_fields_json),
+    manualFields: [...new Set([...decode(row.manual_fields_json), ...decode(row.protected_fields_json)])],
     questions: decode(row.questions_json),
+    questionHistory: questionHistoryFromRow(row),
     answers: decode(row.answers_json),
     revision: row.revision,
     confirmedRevision: row.confirmed_revision,

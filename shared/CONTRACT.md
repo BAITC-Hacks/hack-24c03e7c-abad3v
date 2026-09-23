@@ -149,6 +149,7 @@ type OwnerTask = {
   confirmedCard: Card | null;
   publishedCard: Card | null;
   questions: Question[];
+  questionHistory: Question[];
   answers: Answer[];
   revision: number;
   confirmedRevision: number | null;
@@ -173,7 +174,7 @@ type OwnerTask = {
 
 `Question`: `{id,field,text,sourceRevision}`. `Answer`: `{questionId,value,skipped}`. При пропуске `value:null, skipped:true`; не превращать пропуск в выдуманный ответ.
 
-ID вопроса стабилен для поля (`q:data.availability`; прежние ID сохраняются для совместимости). `task.questions` хранит также прежние вопросы, на которые есть ответы: повторный анализ не теряет их связь. PATCH `answers` обновляет только переданные questionId; остальные ответы сохраняются. Для очистки передать `{questionId,value:null,skipped:false}`.
+ID вопроса стабилен для поля (`q:data.availability`; прежние ID сохраняются для совместимости). `task.questions` хранит также прежние вопросы, на которые есть ответы: повторный анализ не теряет их связь. `questionHistory` сохраняет архив, включая вопросы старых версий приложения. `Question.sourceRevision` — версия создания вопроса, верхнеуровневый `AiResult.sourceRevision` — версия анализируемой карточки. PATCH `answers` обновляет только переданные questionId; остальные ответы сохраняются. Обновлённые ответы перемещаются в конец массива: при нескольких архивных вопросах к одному полю используется последний ответ. Для очистки передать `{questionId,value:null,skipped:false}`. Ограничение 20 ответов снято; действуют предел 2000 символов на ответ и общий лимит JSON 64 КБ.
 
 ```ts
 type AiResult = {
@@ -188,7 +189,11 @@ type AiResult = {
 
 `aiResult` хранит последнее предложение, включая шаблонное, и восстанавливается после загрузки. `evidence` содержит точные цитаты для ненулевых предложенных полей: `draft` — исходное описание, `answer:<questionId>` — сохранённый ответ, `card:<path>` — существующее поле. Неизвестные сведения остаются null. Локальный шаблон консервативно извлекает сведения из текста и переносит ответы, включая перечисления и дату; это не живая генерация. Для срока ответ может содержать `flexible`, `fixed` или дату YYYY-MM-DD; для доступности данных — `available`, `planned`, `unavailable`. Ответ с проверяемым числом на вопрос `success.metric` также предлагается как `success.target`.
 
-`manualFields` — список путей Card, изменённых пользователем, включая намеренно очищенные. PATCH с этим полем заменяет весь список; без него список сохраняется. Frontend отправляет объединение прежнего списка с новыми ручными правками. Backend не перезаписывает эти поля при генерации; frontend также объединяет предложение с рабочей карточкой по полям, сохраняя защищённые правки. Для снятия защиты передать новый список без нужного пути. AI не применяет proposal к workingCard автоматически.
+`manualFields` — список путей Card, изменённых пользователем, включая намеренно очищенные. Новый frontend **всегда** отправляет этот список, включая `[]`: PATCH заменяет список защиты и переносит объединение прежних ручных правок с новыми. Для совместимости со старым frontend при отсутствии `manualFields` изменённые поля автоматически считаются ручными; неизменённые пустые поля не блокируются. Backend не перезаписывает защищённые поля при генерации; frontend также объединяет предложение с рабочей карточкой по полям, сохраняя ручные и несохранённые конкурентные правки. Для снятия защиты передать новый список без нужного пути. AI не применяет proposal к workingCard автоматически.
+
+При повторном анализе прежнее AI-поле очищается, если оно не исправлено вручную, совпадает с предыдущим предложением, а его цитата исчезла из описания/ответа. Frontend переносит и такие `null`; объединение только ненулевых значений восстановит устаревший факт. При недоступности происхождения сохранённое значение сохраняется консервативно.
+
+Старый способ применения AI поддерживается через отдельный PATCH `{revision,sourceRevision,cardPatch}`. Backend проверяет обе версии, отклоняет устаревшее предложение с 409, не меняет уже заполненные/защищённые поля. В этом запросе нельзя одновременно менять исходный текст, тему или ответы. Новый редактор использует явный `manualFields` и проверку версии перед объединением предложения; принятые AI-поля не следует помечать ручными. Оба способа требуют отдельного подтверждения перед публикацией.
 
 `Application`: `{id,taskId,teamId,teamName,idea,plan,timeline,prototypeUrl,status,createdAt,decidedAt}`. Общий список дополнительно содержит `taskTitle`: рабочее название для владельца бизнеса и опубликованное название для команды. Пример timeline — «2 недели»; prototypeUrl — ссылка http/https, не файл.
 
@@ -206,7 +211,7 @@ type AiResult = {
 | `GET /api/tasks?scope=catalog&topic=education&level=ready` | фильтры необязательны; `limit/offset` необязательны | `{items:TaskSummary[],total}`; только опубликованные, сортировка `score DESC, publishedAt DESC` |
 | `GET /api/tasks/applications` | `limit` по умолчанию 100 (1–100), `offset` по умолчанию 0 | `{items:(Application & {taskTitle:string})[],total}`; бизнес видит отклики только на свои задачи, команда — только свои отклики на опубликованные задачи |
 | `GET /api/tasks/:id` | — | `{task:OwnerTask}` владельцу либо `{task:PublicTask}` команде |
-| `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?,manualFields?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision |
+| `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?,manualFields?,sourceRevision?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision |
 | `POST /api/tasks/:id/analyze` | `{revision,mode:"analyze"|"compose"}` | `AiResult`; AI предлагает, сам не сохраняет Card |
 | `POST /api/tasks/:id/confirm` | `{revision,confirmed:true}` | `{task:OwnerTask,rating:Rating}`; подтверждает текущий Card и пересчитывает баллы |
 | `POST /api/tasks/:id/publish` | `{revision}` | `{task:OwnerTask}`; требуется подтверждённая текущая версия, порога рейтинга нет |
