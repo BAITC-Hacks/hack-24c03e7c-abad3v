@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CARD_PATHS } from '../src/card.js';
@@ -310,6 +310,63 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
         assert.equal(stale.status, 409);
       } finally {
         process.env.AI_MODE = previousMode;
+      }
+    });
+
+    await t.test('repaired live questions keep provenance and refinement bases through HTTP, cache and reload', async (t) => {
+      const fixture = JSON.parse(readFileSync(new URL('../../docs/evals/2026-09-23-baseline.json', import.meta.url), 'utf8')).results.find(({ id }) => id === 'rooms-complete');
+      const created = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: { draftText: fixture.input.draftText, topic: 'education' } });
+      const path = `/api/tasks/${created.body.task.id}`;
+      const previous = { AI_MODE: process.env.AI_MODE, OPENAI_API_KEY: process.env.OPENAI_API_KEY, OPENAI_BASE_URL: process.env.OPENAI_BASE_URL, OPENAI_MODEL: process.env.OPENAI_MODEL };
+      Object.assign(process.env, { AI_MODE: 'auto', OPENAI_API_KEY: 'test-no-network', OPENAI_BASE_URL: 'http://model.test.invalid/v1', OPENAI_MODEL: 'gpt-6-sol' });
+      let modelCalls = 0;
+      const stubFetch = t.mock.method(globalThis, 'fetch', (input, options) => {
+        const url = typeof input === 'string' ? input : input.url;
+        if (url?.startsWith(`${base}/`)) return originalFetch(input, options);
+        assert.ok(url?.startsWith('http://model.test.invalid/v1/'), 'Never send this fixture to an external provider');
+        modelCalls++;
+        return Promise.resolve(new Response(JSON.stringify({ id: 'fixture-response', object: 'response', status: 'completed',
+          output: [{ id: 'fixture-message', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: JSON.stringify(fixture.rawModelOutput), annotations: [] }] }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        }), { status: 200, headers: { 'content-type': 'application/json' } }));
+      });
+      try {
+        const analyzed = await request(`${path}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: 1, mode: 'analyze' } });
+        assert.equal(analyzed.status, 200);
+        assert.equal(analyzed.body.mode, 'live');
+        assert.equal(analyzed.body.proposal.success.target, 'Минимум 4 из 5 участников находят аудиторию за 2 минуты.');
+        assert.ok(analyzed.body.questions.length >= 3);
+        assert.ok(analyzed.body.questions.every(({ origin }) => origin === 'template'));
+        const refinement = analyzed.body.questions.find(({ field, refines }) => field === 'data.source' && refines);
+        assert.ok(refinement.id.startsWith('q:refine:data.source:'));
+        assert.equal(refinement.baseValue, analyzed.body.proposal.data.source);
+        const cached = await request(`${path}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: 1, mode: 'analyze' } });
+        assert.equal(cached.body.mode, 'cached');
+        assert.deepEqual(cached.body.questions, analyzed.body.questions);
+        assert.equal(modelCalls, 1);
+        const reopened = (await request(path, { cookie: businessCookie })).body.task;
+        assert.deepEqual(reopened.questions, analyzed.body.questions);
+        const combined = `${refinement.baseValue}\n\nПроверим заполненность обязательных полей.`;
+        const applied = await request(path, { method: 'PATCH', cookie: businessCookie, body: { revision: 1, manualFields: [],
+          answers: [{ questionId: refinement.id, value: combined, skipped: false }], cardPatch: { ...analyzed.body.proposal, data: { ...analyzed.body.proposal.data, source: combined } },
+        } });
+        assert.equal(applied.status, 200);
+        const skipped = await request(path, { method: 'PATCH', cookie: businessCookie, body: { revision: 2, manualFields: [],
+          answers: [{ questionId: refinement.id, value: null, skipped: true }], cardPatch: { data: { source: refinement.baseValue } },
+        } });
+        assert.equal(skipped.status, 200);
+        assert.equal(skipped.body.task.workingCard.data.source, refinement.baseValue);
+        process.env.AI_MODE = 'template';
+        const composed = await request(`${path}/analyze`, { method: 'POST', cookie: businessCookie, body: { revision: 3, mode: 'compose' } });
+        assert.equal(composed.status, 200);
+        assert.match(composed.body.proposal.data.source, /CSV.*аудитори/iu);
+        assert.ok(!composed.body.proposal.data.source.includes('Проверим заполненность'));
+        assert.equal(modelCalls, 1);
+      } finally {
+        stubFetch.mock.restore();
+        for (const [key, value] of Object.entries(previous)) {
+          if (value === undefined) delete process.env[key]; else process.env[key] = value;
+        }
       }
     });
 

@@ -1,5 +1,5 @@
 export type QuestionOption = { label: string; value: string }
-export type OptionQuestion = { field: string; text?: string; options?: unknown }
+export type OptionQuestion = { field: string; text?: string; options?: unknown; refines?: boolean; origin?: 'live' | 'template' }
 type ContextCard = {
   title?: string | null; context?: string | null; need?: string | null; users?: string | null
   result?: { artifact?: string | null; scope?: string | null }

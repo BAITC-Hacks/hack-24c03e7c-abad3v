@@ -11,6 +11,9 @@ export function latestAnswerStates(task) {
   for (const answer of [...(task.answers ?? [])].reverse()) {
     const question = questions.get(answer.questionId);
     if (!question || !CARD_PATHS.includes(question.field) || seen.has(question.field)) continue;
+    // Skipping an optional refinement withdraws only the addition, not the
+    // already-known base statement or an older answer that established it.
+    if (question.refines && (answer.skipped || !hasMeaningfulValue(answer.value))) continue;
     seen.add(question.field);
     sources.push({ id: `answer:${answer.questionId}`, field: question.field, question: question.text, text: answer.value, skipped: Boolean(answer.skipped) });
   }

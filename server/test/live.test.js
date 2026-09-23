@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { emptyCard, mergeCard } from '../src/card.js';
 import { AI_REQUEST_MAX_BYTES, composeLiveProposal, composeLiveResult, liveResult, prepareLiveRequest } from '../src/ai.js';
 
@@ -207,7 +208,7 @@ test('live result validates citations against the submitted snapshot and returns
   }), /matching source/);
 });
 
-test('malformed and incomplete provider responses cannot become accepted results', async () => {
+test('malformed facts and incomplete provider responses cannot become accepted results', async () => {
   const responses = [
     modelResponse(modelBody(), { status: 'incomplete' }),
     modelResponse(modelBody(), { output_text: '' }),
@@ -219,9 +220,68 @@ test('malformed and incomplete provider responses cannot become accepted results
   for (const response of responses) {
     await assert.rejects(liveResult(task(), 'compose', { client: stubClient(async () => response) }));
   }
-  const questions = [1, 2, 3].map((index) => ({ id: `q${index}`, field: 'need', text: 'Что нужно изменить?' }));
-  for (const list of [[], questions]) {
-    await assert.rejects(liveResult(task(), 'analyze', { client: stubClient(async () => modelResponse(modelBody({ questions: list }))) }), /distinct questions/);
+});
+
+test('missing, duplicated or broken questions do not discard a grounded card or cause another API call', async () => {
+  const duplicates = [1, 2, 3].map((index) => ({ id: `q${index}`, field: 'data.source', text: 'Откуда можно получить данные?' }));
+  for (const questions of [[], duplicates, [{ field: 'invalid', text: 'x' }], 'broken']) {
+    let calls = 0;
+    const { result } = await liveResult(task(), 'analyze', { client: stubClient(async (request) => {
+      calls++;
+      assert.equal(request.text.format.schema.properties.questions.minItems, 3);
+      return modelResponse(modelBody({ facts: [fact('result.artifact', 'Сайт для студентов')], questions }));
+    }) });
+    assert.equal(calls, 1);
+    assert.equal(result.proposal.result.artifact, 'Сайт для студентов');
+    assert.equal(result.proposal.title, 'Сайт для студентов');
+    assert.ok(result.questions.length >= 3 && result.questions.length <= 5);
+    assert.equal(new Set(result.questions.map(({ field }) => field)).size, result.questions.length);
+    assert.ok(result.questions.some((question) => question.origin === 'template'));
+    assert.ok(result.warnings.some((warning) => /локальн|шаблон/iu.test(warning)));
+  }
+});
+
+test('replay of the rejected complete-brief response preserves its useful facts without network access', async () => {
+  const baseline = JSON.parse(readFileSync(new URL('../../docs/evals/2026-09-23-baseline.json', import.meta.url), 'utf8'));
+  const item = baseline.results.find(({ id }) => id === 'rooms-complete');
+  const { result } = await liveResult(item.input, 'analyze', { client: stubClient(async () => modelResponse(item.rawModelOutput)) });
+  assert.equal(result.proposal.title, 'Свободная аудитория');
+  assert.equal(result.proposal.constraints.deadlineDate, '2026-10-15');
+  assert.equal(result.proposal.success.target, 'Минимум 4 из 5 участников находят аудиторию за 2 минуты.');
+  assert.ok(result.questions.length >= 3);
+  assert.ok(result.questions.every((question) => question.origin === 'template'));
+  for (const question of result.questions.filter((question) => question.refines)) {
+    assert.equal(question.baseValue, question.field.split('.').reduce((value, key) => value[key], result.proposal));
+  }
+});
+
+test('local titles use grounded facts and never overwrite a manual title or protected blank', async () => {
+  for (const title of ['Моё название', null]) {
+    const source = task({ workingCard: mergeCard(emptyCard(), { title }), manualFields: ['title'] });
+    const { result } = await liveResult(source, 'compose', { client: stubClient(async () => modelResponse(modelBody({ facts: [fact('result.artifact', 'Сайт для студентов')] }))) });
+    assert.equal(result.proposal.title, title);
+  }
+  const source = task({ draftText: 'Данных пока нет.' });
+  const { result } = await liveResult(source, 'compose', { client: stubClient(async () => modelResponse()) });
+  assert.equal(result.proposal.title, null, 'unrelated text must not become an invented project title');
+});
+
+test('withdrawing a refinement restores its base instead of discarding known information', () => {
+  for (const answer of [{ value: null, skipped: true }, { value: 'Пока не знаю', skipped: false }]) {
+    const base = 'Поиск аудиторий без бронирования.';
+    const combined = `${base} Обрабатывать отсутствие свободных помещений.`;
+    const source = task({
+      workingCard: mergeCard(emptyCard(), { result: { scope: combined } }),
+      questions: [{ id: 'refine-scope', field: 'result.scope', text: 'Какие исключения учесть?', refines: true, baseValue: base }],
+      answers: [{ questionId: 'refine-scope', ...answer }],
+      aiResult: { proposal: mergeCard(emptyCard(), { result: { scope: combined } }), evidence: [{ field: 'result.scope', sourceId: 'answer:refine-scope', quote: combined }] },
+    });
+    const result = composeLiveResult(source, []);
+    assert.equal(result.proposal.result.scope, base);
+    assert.ok(!result.evidence.some(({ sourceId }) => sourceId === 'answer:refine-scope'));
+    const prepared = prepareLiveRequest(source, 'compose');
+    const cardSource = JSON.parse(prepared.input[1].content).sources.find(({ id }) => id === 'card:result.scope');
+    assert.equal(cardSource.text, base);
   }
 });
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { getQuestionOptions, normalizeQuestionOptions } from '../shared/question-options.js'
+import { hasMeaningfulValue } from '../shared/card-values.js'
 
 const domainExamples = [
   ['Нужен поиск свободных аудиторий по расписанию.', /аудитор|помещени|расписан/iu],
@@ -85,4 +86,86 @@ test('candidate count is capped, malformed input falls back, and consultation op
   const feedback = normalizeQuestionOptions({ field: 'contact.feedback' }, task, [{ label: 'Проверит Иван', value: 'Иван Петров ответит завтра.' }])
   assert.equal(feedback.length, 3)
   assert.doesNotMatch(feedback.map(option => option.value).join(' '), /Иван|Петров|завтра/u)
+})
+
+test('baseline role and unknown consultation options survive without becoming a format question', () => {
+  const question = { field: 'contact.consultation', text: 'Кто сможет консультировать студенческую команду по процессу записи?' }
+  const task = { draftText: 'Запись студентов на консультации преподавателя.' }
+  const offered = [
+    { label: 'Преподаватель', value: 'Преподаватель сможет отвечать на вопросы о процессе записи.' },
+    { label: 'Представитель заказчика', value: 'Представитель заказчика сможет консультировать команду.' },
+    { label: 'Пока неизвестно', value: 'Консультант пока не определён.' },
+  ]
+  const actual = normalizeQuestionOptions(question, task, offered)
+  assert.deepEqual(actual.slice(0, 2), offered.slice(0, 2))
+  assert.deepEqual(actual[2], { label: 'Пока неизвестно', value: 'Не знаю.' })
+  assert.equal(hasMeaningfulValue(actual[2].value), false, 'an unknown role must not earn card points')
+  assert.deepEqual(normalizeQuestionOptions(question, task, actual), actual)
+  assert.doesNotMatch(actual.map(option => option.value).join(' '), /письменно|графику|короткие встречи/u)
+})
+
+test('baseline contact options keep cadence and an explicit absence of consultation', () => {
+  const question = { field: 'contact.consultation', text: 'Сможет ли преподаватель консультировать команду по упражнениям и интерпретации ошибок?' }
+  const candidates = [
+    { label: 'Регулярно', value: 'Преподаватель сможет регулярно отвечать на вопросы команды и пояснять ошибки.' },
+    { label: 'По запросу', value: 'Преподаватель сможет консультировать команду по отдельным вопросам.' },
+    { label: 'Не планируется', value: 'Консультации преподавателя в ходе работы не планируются.' },
+  ]
+  assert.deepEqual(normalizeQuestionOptions(question, {}, candidates), candidates)
+  assert.ok(getQuestionOptions(question).some(option => /не планируются/u.test(option.value)))
+  const who = getQuestionOptions({ field: 'contact.feedback', text: 'Кто проверит прототип?' })
+  assert.ok(who.some(option => /Специалист|Представитель/u.test(option.value)))
+  const frequency = getQuestionOptions({ field: 'contact.consultation', text: 'Как часто команда сможет консультироваться с вами?' })
+  assert.ok(frequency.some(option => /рабочие дни/u.test(option.value)), 'frequency must take precedence over сможет')
+  const feedback = getQuestionOptions({ field: 'contact.feedback', text: 'Сможет ли заказчик дать обратную связь?' })
+  assert.ok(feedback.some(option => /готовый прототип/u.test(option.value)))
+  assert.doesNotMatch(feedback.map(option => option.value).join(' '), /консультировать/u)
+})
+
+test('contact choices reject invented identities and addresses while retaining roles', () => {
+  const role = { label: 'Методист', value: 'Методист сможет проверить результат.' }
+  const result = normalizeQuestionOptions({ field: 'contact.feedback', text: 'Кто проверит прототип?' }, {}, [
+    role, { label: 'Ответственный', value: 'Иван проверит результат.' },
+    { label: 'Проверяющий', value: 'Дмитрий проверит прототип.' },
+    { label: 'Петров', value: 'Иван Петров ответит завтра.' },
+    { label: 'Почта', value: 'Проверяющий доступен по teacher@example.org.' },
+  ])
+  assert.deepEqual(result[0], role)
+  assert.doesNotMatch(result.map(option => option.value).join(' '), /Иван|Дмитрий|Петров|завтра|@/u)
+})
+
+test('vague demo or feedback metrics are replaced by contextual measurable options', () => {
+  const valid = { label: 'Время поиска', value: 'Оценивать время, необходимое студенту для поиска свободной аудитории.' }
+  const result = normalizeQuestionOptions({ field: 'success.metric' }, { draftText: 'Нужен поиск свободных аудиторий.' }, [
+    valid,
+    { label: 'Демонстрация', value: 'Возможность продемонстрировать предусмотренные сценарии работы.' },
+    { label: 'Проверка преподавателем', value: 'Результаты проверки прототипа преподавателем.' },
+    { label: 'Отзывы', value: 'Оценивать удобство прототипа по отзывам студентов.' },
+  ])
+  assert.deepEqual(result[0], valid)
+  assert.equal(result.length, 3)
+  assert.doesNotMatch(result.map(option => option.value).join(' '), /продемонстрировать|Результаты проверки|по отзывам/u)
+  assert.match(result.map(option => option.value).join(' '), /Доля|Соответствие/u)
+  const music = getQuestionOptions({ field: 'success.metric' }, { draftText: 'Прототип разбора ошибок ритма по аудиозаписям и MIDI.' })
+  assert.ok(music.every(option => /ритм|упражнени/u.test(option.value)))
+  const library = getQuestionOptions({ field: 'success.metric' }, { draftText: 'Библиотекарям нужен поиск книги и просмотр её доступности.' })
+  assert.doesNotMatch(library.map(option => option.value).join(' '), /жанр|срез.*отч/u)
+})
+
+test('local refinements suggest checks and edge cases without replacing known field values', () => {
+  for (const [field, vocabulary] of [
+    ['data.source', /Провер|Подтверд/u], ['result.scope', /Уточним/u],
+    ['constraints.technologyAccess', /провер|Сверим/iu], ['contact.feedback', /Зафиксируем|сверим|зафиксируем/u],
+  ] as const) {
+    const question = { field, refines: true, origin: 'template' as const }
+    const offered = getQuestionOptions(question, { draftText: 'Поиск свободных аудиторий.' })
+    assert.equal(offered.length, 3)
+    assert.ok(offered.every(option => vocabulary.test(option.value)), field)
+    assert.deepEqual(normalizeQuestionOptions(question, {}, offered), offered)
+    assert.doesNotMatch(offered.map(option => option.value).join(' '), /Подготовим синтетическую|бронирование оставить|Команда выбирает технологии/u)
+  }
+  const refined = { field: 'contact.feedback', text: 'Кто подтвердит итог проверки?', refines: true, origin: 'live' as const }
+  const candidate = { label: 'Методист', value: 'Методист подтвердит итог проверки.' }
+  assert.deepEqual(normalizeQuestionOptions(refined, {}, [candidate]), [candidate], 'do not append unrelated generic formats to a model refinement')
+  assert.deepEqual(getQuestionOptions({ field: 'users', refines: true }), [])
 })

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import OpenAI from 'openai';
 import { cases } from './cases.js';
-import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, prepareLiveRequest } from '../src/ai.js';
+import { AI_PROMPT_VERSION, AI_TIMEOUT_MS, MODEL_PRICES, liveResult, prepareLiveRequest } from '../src/ai.js';
 import { getField } from '../src/card.js';
 
 const args = process.argv.slice(2);
@@ -29,9 +29,9 @@ const output = resolve(value('out', `server/data/evals/${new Date().toISOString(
 mkdirSync(dirname(output), { recursive: true });
 let codeRevision = null;
 try { codeRevision = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { /* Running outside a Git checkout is supported. */ }
-const report = { startedAt: new Date().toISOString(), codeRevision, promptVersion: AI_PROMPT_VERSION, model, reasoningEffort: 'none', timeoutMs: 12000, maxRetries: 0, runCapUsd: runCap, estimatedUsd: 0, synthetic: true, results: [] };
+const report = { startedAt: new Date().toISOString(), codeRevision, promptVersion: AI_PROMPT_VERSION, model, reasoningEffort: 'none', timeoutMs: AI_TIMEOUT_MS, maxRetries: 0, runCapUsd: runCap, estimatedUsd: 0, synthetic: true, results: [] };
 const save = () => writeFileSync(output, `${JSON.stringify(report, null, 2)}\n`);
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 12000, maxRetries: 0 });
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: AI_TIMEOUT_MS, maxRetries: 0 });
 let recentStarts = [];
 let providerFailures = 0;
 
@@ -71,6 +71,9 @@ for (const item of selected) {
     entry.status = 'live';
     entry.result = response.result;
     entry.checks = [
+      { rule: 'title-present', pass: Boolean(response.result.proposal.title?.trim()) },
+      ...(item.mode === 'analyze' ? [{ rule: 'three-to-five-distinct-questions', pass: response.result.questions.length >= 3 && response.result.questions.length <= 5 && new Set(response.result.questions.map(({ field }) => field)).size === response.result.questions.length }] : []),
+      ...(item.requiredFields ?? []).map((field) => ({ rule: 'known-field-present', field, pass: Boolean(getField(response.result.proposal, field)?.trim()) })),
       ...Object.entries(item.expected ?? {}).map(([field, expected]) => ({ rule: 'exact', field, pass: getField(response.result.proposal, field) === expected, expected, actual: getField(response.result.proposal, field) })),
       ...Object.entries(item.allowed ?? {}).map(([field, allowed]) => ({ rule: 'allowed', field, pass: allowed.includes(getField(response.result.proposal, field)), expected: allowed, actual: getField(response.result.proposal, field) })),
       ...(item.nullFields ?? []).map((field) => ({ rule: 'unknown-stays-null', field, pass: getField(response.result.proposal, field) === null, actual: getField(response.result.proposal, field) })),

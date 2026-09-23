@@ -18,7 +18,7 @@ export type Card = {
 export type RatingLine = { key: string; label: string; earned: number; max: number; missing: string[] }
 export type Rating = { score: number; level: Level; breakdown: RatingLine[]; missingFields: string[]; scoringVersion: string }
 export type AnswerOption = { label: string; value: string }
-export type Question = { id: string; field: string; text: string; sourceRevision: number; options?: AnswerOption[] }
+export type Question = { id: string; field: string; text: string; sourceRevision: number; options?: AnswerOption[]; origin?: 'live' | 'template'; refines?: boolean; baseValue?: string }
 export type Answer = { questionId: string; value: string | null; skipped: boolean }
 
 export type TaskSummary = {

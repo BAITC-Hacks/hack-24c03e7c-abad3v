@@ -23,10 +23,14 @@ export function startingProposal(task) {
   const protectedFields = protectedPaths(task);
   const withdrawnFields = new Set(latestAnswerStates(task).filter((answer) => answer.skipped || !hasMeaningfulValue(answer.text)).map((answer) => answer.field));
   const previousResult = task.aiResult ?? task.lastAnalysis;
+  const questions = new Map([...(task.questionHistory ?? []), ...(task.questions ?? [])].map((question) => [question.id, question]));
   for (const prior of previousResult?.evidence ?? []) {
     const generated = prior.sourceId === 'draft' || prior.sourceId.startsWith('answer:');
     const unchanged = getField(previousResult.proposal, prior.field) === getField(proposal, prior.field);
-    if (generated && unchanged && !protectedFields.has(prior.field) && (withdrawnFields.has(prior.field) || !sourceMap.get(prior.sourceId)?.includes(prior.quote))) setField(proposal, prior.field, null);
+    if (generated && unchanged && !protectedFields.has(prior.field) && (withdrawnFields.has(prior.field) || !sourceMap.get(prior.sourceId)?.includes(prior.quote))) {
+      const question = questions.get(prior.sourceId.slice('answer:'.length));
+      setField(proposal, prior.field, question?.refines && hasMeaningfulValue(question.baseValue) ? question.baseValue : null);
+    }
   }
   const evidence = (previousResult?.evidence ?? []).filter((prior) => !protectedFields.has(prior.field)
     && getField(proposal, prior.field) && sourceMap.get(prior.sourceId)?.includes(prior.quote)

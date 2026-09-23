@@ -299,8 +299,12 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   if (latest.revision !== row.revision) fail(409, 'REVISION_CONFLICT', 'Задача изменилась во время AI-запроса');
   const history = questionHistoryFromRow(latest);
   const questions = body.mode === 'analyze' ? result.questions.map((q) => {
-    const existing = history.find((item) => item.field === q.field && item.text === q.text) ?? history.find((item) => item.field === q.field);
-    const question = { ...q, options: normalizeQuestionOptions(q, task, q.options), id: existing?.id ?? (mode === 'cached' ? q.id : `q:${q.field}`), sourceRevision: existing?.sourceRevision ?? row.revision };
+    const compatible = (item) => item.field === q.field && Boolean(item.refines) === Boolean(q.refines)
+      && (!q.refines || item.baseValue === q.baseValue);
+    const existing = history.find((item) => compatible(item) && item.text === q.text)
+      ?? (!q.refines ? history.find(compatible) : undefined);
+    const refinementId = q.refines ? `q:refine:${q.field}:${createHash('sha256').update(encode([q.text, q.baseValue])).digest('hex').slice(0, 12)}` : `q:${q.field}`;
+    const question = { ...q, options: normalizeQuestionOptions(q, { ...task, workingCard: result.proposal }, q.options), id: existing?.id ?? (mode === 'cached' ? q.id : refinementId), sourceRevision: existing?.sourceRevision ?? row.revision };
     const index = history.findIndex((item) => item.id === question.id);
     if (index < 0) history.push(question);
     else history[index] = question;

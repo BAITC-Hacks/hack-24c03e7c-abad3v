@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, errorMessage } from './api'
 import type { AiResult, Card, OwnerTask, Question, Topic } from './types'
 import { Badge, EmptyState, Icon, PrimaryButton, SecondaryButton, topicOptions } from './ui'
-import { evidenceFor, fieldLabel, fields, formFromTask, getField, mergeProposal, readLocal, rebaseForm, recordAnswer, setField, signature, writeLocal, type EditorForm } from './editorModel'
+import { evidenceFor, fieldLabel, fields, formFromTask, getField, mergeProposal, questionAnswerDetail, questionAnswerValue, readLocal, rebaseForm, recordAnswer, refinementBase, setField, signature, writeLocal, type EditorForm } from './editorModel'
 import { aiModeLabel, aiNeedsRefresh, answerFeedback } from './editorStatus'
 import { hasMeaningfulValue } from '../shared/card-values.js'
 import { normalizeQuestionOptions } from '../shared/question-options.js'
@@ -246,19 +246,22 @@ function SavedTaskEditor({ taskId, actorId, step, registerSave, onStep, onBack, 
             const response = form.answers.find(a => a.questionId === question.id)
             const answered = !!response?.value || !!response?.skipped
             const feedback = answerFeedback(question, form)
+            const base = refinementBase(question)
             const choices = normalizeQuestionOptions(question, { draftText: ai?.inputSnapshot?.draftText || task.draftText, workingCard: ai?.proposal || task.workingCard }, question.options)
             return <details open={activeQuestion === index} className={`guided-question ${answered ? 'is-answered' : ''}`} key={question.id}><summary onClick={event => { event.preventDefault(); setActiveQuestion(index) }}><span className="question-number">{answered ? <Icon name="check" size={14} /> : index + 1}</span><span>{question.text}</span><Icon name="chevron" size={15} /></summary><div className="question-body">
+              {question.origin === 'template' && <span className="manual-label">Шаблонное уточнение</span>}
+              {base && <div className="field-evidence"><strong>Уже указано</strong><blockquote>{base}</blockquote><p>Ответ дополнит эти сведения. Добавьте недостающую деталь; исходное описание сохранится.</p></div>}
               {choices.length > 0 && <div className="answer-options" role="group" aria-label={`Варианты ответа: ${fieldLabel(question.field)}`}>
                 <p>Выберите подходящий вариант{!options[question.field] && ' или напишите свой ответ ниже'}.</p>
                 {choices.map(choice => {
-                  const selected = !response?.skipped && response?.value === choice.value
+                  const selected = !response?.skipped && response?.value === questionAnswerValue(question, choice.value)
                   return <button type="button" key={choice.value} className={`answer-option ${selected ? 'is-selected' : ''}`} aria-pressed={selected} disabled={busy} onClick={() => answer(question, choice.value)}>
                     <span className="answer-option-mark" aria-hidden="true">{selected && <Icon name="check" size={13} />}</span>
                     <span><strong>{choice.label}</strong>{!options[question.field] && choice.label !== choice.value && <span>{choice.value}</span>}</span>
                   </button>
                 })}
               </div>}
-              {(!choices.length || !options[question.field]) && <><label className="field-label" htmlFor={`answer-${question.id}`}>{choices.length ? 'Ваш ответ — можно изменить' : fieldLabel(question.field)}</label><FieldInput id={`answer-${question.id}`} path={question.field} value={response?.value || ''} onChange={value => answer(question, value)} disabled={busy} /></>}{question.field === 'constraints.deadlineMode' && form.card.constraints.deadlineMode === 'fixed' && <label className="date-answer">Дата сдачи<input aria-label="Дата сдачи" disabled={busy} className="text-input" type="date" value={form.card.constraints.deadlineDate || ''} onChange={event => editField('constraints.deadlineDate', event.target.value || null)} /></label>}<div className="question-foot"><button className="text-button" disabled={busy} onClick={() => { answer(question, null, !response?.skipped); if (!response?.skipped && index < questions.length - 1) setActiveQuestion(index + 1) }}>{response?.skipped ? 'Ответить на вопрос' : 'Пока не знаю'}</button>{index < questions.length - 1 && <button className="text-button" onClick={() => setActiveQuestion(index + 1)}>Следующий вопрос <Icon name="arrow" size={15} /></button>}</div>{feedback && <p className="answer-applied"><Icon name="check" size={14} />{feedback}</p>}</div></details>
+              {(!choices.length || !options[question.field]) && <><label className="field-label" htmlFor={`answer-${question.id}`}>{base ? 'Уточнение — исходные сведения сохранятся' : choices.length ? 'Ваш ответ — можно изменить' : fieldLabel(question.field)}</label><FieldInput id={`answer-${question.id}`} path={question.field} value={questionAnswerDetail(question, response?.value || null)} onChange={value => answer(question, value)} disabled={busy} maxLength={base ? Math.max(0, 2000 - base.length - 2) : undefined} /></>}{question.field === 'constraints.deadlineMode' && form.card.constraints.deadlineMode === 'fixed' && <label className="date-answer">Дата сдачи<input aria-label="Дата сдачи" disabled={busy} className="text-input" type="date" value={form.card.constraints.deadlineDate || ''} onChange={event => editField('constraints.deadlineDate', event.target.value || null)} /></label>}<div className="question-foot"><button className="text-button" disabled={busy} onClick={() => { answer(question, null, !response?.skipped); if (!response?.skipped && index < questions.length - 1) setActiveQuestion(index + 1) }}>{response?.skipped ? 'Ответить на вопрос' : 'Пока не знаю'}</button>{index < questions.length - 1 && <button className="text-button" onClick={() => setActiveQuestion(index + 1)}>Следующий вопрос <Icon name="arrow" size={15} /></button>}</div>{feedback && <p className="answer-applied"><Icon name="check" size={14} />{feedback}</p>}</div></details>
           })}</div>
           <div className="clarification-bottom"><p>Достаточно известных сведений. Дополнить задачу можно и после публикации.</p><PrimaryButton className="button-block" icon="arrow" disabled={busy || !!conflict} onClick={() => void runAi('compose', true)}>{busy ? 'Готовим карточку…' : 'Перейти к проверке'}</PrimaryButton><button className="text-button" onClick={async () => { if (await persist()) onStep('review') }} disabled={busy || !!conflict}>Проверить без повторного анализа</button></div>
         </section>}
@@ -285,9 +288,9 @@ function SavedTaskEditor({ taskId, actorId, step, registerSave, onStep, onBack, 
   </div>
 }
 
-function FieldInput({ path, id, value, label, onChange, disabled = false }: { path: string; id: string; value: string; label?: string; onChange: (value: string | null) => void; disabled?: boolean }) {
+function FieldInput({ path, id, value, label, onChange, disabled = false, maxLength }: { path: string; id: string; value: string; label?: string; onChange: (value: string | null) => void; disabled?: boolean; maxLength?: number }) {
   if (options[path]) return <select id={id} aria-label={label} className="select-control" value={value} disabled={disabled} onChange={event => onChange(event.target.value || null)}><option value="">Пока неизвестно</option>{options[path].map(item => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
   if (path === 'constraints.deadlineDate') return <input id={id} aria-label={label} className="text-input" type="date" value={value} disabled={disabled} onChange={event => onChange(event.target.value || null)} />
-  if (path === 'title' || path === 'contact.channel') return <input id={id} aria-label={label} className="text-input" maxLength={path === 'title' ? 120 : 1000} value={value} disabled={disabled} onChange={event => onChange(event.target.value || null)} />
-  return <textarea id={id} aria-label={label} className="textarea" rows={3} maxLength={1000} value={value} placeholder="Ваш ответ…" disabled={disabled} onChange={event => onChange(event.target.value || null)} />
+  if (path === 'title' || path === 'contact.channel') return <input id={id} aria-label={label} className="text-input" maxLength={maxLength ?? (path === 'title' ? 120 : 1000)} value={value} disabled={disabled} onChange={event => onChange(event.target.value || null)} />
+  return <textarea id={id} aria-label={label} className="textarea" rows={3} maxLength={maxLength ?? 1000} value={value} placeholder="Ваш ответ…" disabled={disabled} onChange={event => onChange(event.target.value || null)} />
 }

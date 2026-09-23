@@ -39,14 +39,35 @@ export function answerIntoCard(form: EditorForm, field: string, value: string | 
   if (field === 'constraints.deadlineMode' && value !== 'fixed') card = setField(card, 'constraints.deadlineDate', null)
   return { ...form, card }
 }
+export function refinementBase(question: Question): string | null {
+  if (!question.refines || ['data.availability', 'constraints.deadlineMode', 'constraints.deadlineDate', 'contact.channel'].includes(question.field)) return null
+  return normalizeKnownValue(question.baseValue || null)
+}
+export function questionAnswerValue(question: Question, value: string | null): string | null {
+  const base = refinementBase(question), known = normalizeKnownValue(value)
+  if (!base || !known) return value
+  if (known === base || known.startsWith(`${base}\n`) || known.startsWith(`${base} `)) return value
+  return `${base}\n\n${value}`
+}
+export function questionAnswerDetail(question: Question, value: string | null): string {
+  const base = refinementBase(question), text = value || ''
+  if (!base || !text.trimStart().startsWith(base)) return text
+  return text.trimStart().slice(base.length).replace(/^\s+/u, '')
+}
 export function recordAnswer(form: EditorForm, question: Question, value: string | null, skipped = false): EditorForm {
+  const base = refinementBase(question)
+  const answerValue = skipped ? null : questionAnswerValue(question, value)
   let next: EditorForm = {
     ...form,
-    answers: [...form.answers.filter(answer => answer.questionId !== question.id), { questionId: question.id, value: skipped ? null : value, skipped }],
+    answers: [...form.answers.filter(answer => answer.questionId !== question.id), { questionId: question.id, value: answerValue, skipped }],
   }
-  next = answerIntoCard(next, question.field, skipped ? null : value)
-  const knownValue = normalizeKnownValue(value)
-  if (question.field === 'success.metric' && !skipped && !form.manualFields.includes('success.metric')
+  const knownValue = normalizeKnownValue(answerValue)
+  const cardValue = base && (skipped || !knownValue) ? base : knownValue
+  // Keep the full answer for recovery. The owner must shorten an oversized
+  // refinement explicitly rather than receiving a silently truncated card.
+  if (base && cardValue && cardValue.length > (question.field === 'title' ? 120 : 1000)) return next
+  next = answerIntoCard(next, question.field, cardValue)
+  if (question.field === 'success.metric' && !base && !skipped && !form.manualFields.includes('success.metric')
     && !form.manualFields.includes('success.target') && knownValue && /\d|минимум|хотя бы|не менее|четверо|пятеро/i.test(knownValue)) {
     next = answerIntoCard(next, 'success.target', knownValue)
   }

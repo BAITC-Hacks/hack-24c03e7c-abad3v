@@ -8,6 +8,7 @@ export const cases = [
     id: 'rooms-sparse', mode: 'analyze',
     task: task('Студенты сейчас вручную ищут свободные аудитории и теряют время. Хотим веб-прототип со списком помещений и свободных временных слотов.'),
     nullFields: ['data.availability', 'data.source', 'success.metric', 'success.target', 'constraints.deadlineDate', 'contact.channel'],
+    requiredFields: ['title', 'context', 'users', 'result.artifact'],
     review: 'Вопросы о данных, приёмке и границах поиска; варианты конкретны для аудиторий, но не утверждают наличие данных.',
   },
   {
@@ -27,7 +28,7 @@ export const cases = [
   {
     id: 'unknowns', mode: 'analyze',
     task: task('Нужен тренажёр собеседований для студентов. Как будет выглядеть прототип — пока неизвестно. Доступность и источник данных пока неизвестны. Критерии успеха и срок пока не согласованы. Контакта проверяющего пока нет.'),
-    nullFields: ['data.availability', 'data.source', 'result.artifact', 'success.metric', 'success.target', 'constraints.deadlineMode', 'constraints.deadlineDate', 'contact.channel'],
+    nullFields: ['data.availability', 'data.source', 'success.metric', 'success.target', 'constraints.deadlineMode', 'constraints.deadlineDate', 'contact.channel'],
     review: 'Не превращать неизвестность в unavailable/flexible. Помочь выбрать следующий шаг без выдуманных договорённостей.',
   },
   {
@@ -65,6 +66,7 @@ export const cases = [
     }),
     expected: { title: 'Моё название: Поиск аудитории', 'result.scope': 'Только поиск, без бронирования.', 'constraints.deadlineMode': 'flexible' },
     allowed: { 'data.availability': ['planned', 'unavailable'] },
+    requiredFields: ['data.source', 'success.metric'],
     nullFields: ['constraints.deadlineDate', 'success.target', 'contact.channel'],
     review: 'Свежие ответы из истории важнее устаревшего описания. Не потерять ручное название/scope и не вернуть отменённую дату.',
   },
@@ -81,6 +83,7 @@ export const cases = [
       answers: [{ questionId: 'metric', value: 'Совпадение числа доступных экземпляров с журналом. Проверяет библиотекарь.', skipped: false }],
     }),
     nullFields: ['data.availability', 'data.source', 'success.target', 'constraints.deadlineDate', 'contact.channel'],
+    requiredFields: ['success.metric'],
     review: 'В карточке только выбранная метрика; не переносить альтернативный вариант времени поиска или непринятый CSV.',
   },
 ];

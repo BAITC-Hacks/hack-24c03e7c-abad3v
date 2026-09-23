@@ -24,7 +24,7 @@ const profiles = {
     sources: [['Открытые примеры вопросов', 'Используем открытые примеры вопросов и отдельно укажем их источники.'], ['Материалы наставника', 'Запросим у наставника примеры вопросов и критерии разбора ответов.'], ['Синтетические интервью', 'Подготовим вымышленные примеры ответов для проверки работы прототипа.']],
     artifact: ['Веб-прототип тренировки ответов на собеседовании', 'Чат-прототип пробного интервью', 'Интерактивный макет разбора ответов и плана подготовки'],
     scope: [['Вопрос и разбор ответа', 'Включить вопрос, текстовый ответ и разбор по критериям; голосовое интервью отложить.'], ['Сценарий интервью', 'Включить последовательность вопросов по выбранной теме и итоговую обратную связь; подбор вакансий не включать.'], ['Проверка готового ответа', 'Включить разбор введённого ответа и рекомендации по улучшению; автоматическую оценку пригодности к работе не включать.']],
-    metrics: ['Соответствие обратной связи согласованным критериям разбора', 'Понятность рекомендаций для участников пробного интервью', 'Доля замечаний, которые подтверждает проверяющий наставник'],
+    metrics: ['Соответствие обратной связи согласованным критериям разбора', 'Доля участников, которые после разбора могут назвать следующий шаг подготовки к собеседованию', 'Доля замечаний, которые подтверждает проверяющий наставник'],
     targets: ['Замечания к ответам обоснованы согласованными критериями и не содержат выдуманных фактов.', 'Участник понимает, что улучшить в ответе, и может применить рекомендации.', 'Прототип проходит согласованные сценарии интервью и явно отмечает неопределённость.'],
   },
   inventory: {
@@ -72,7 +72,7 @@ const profiles = {
     sources: [['Синтетические объявления', 'Подготовим вымышленные объявления со сведениями о направлении, формате и требованиях.'], ['Материалы центра', 'Запросим у карьерного центра разрешённую для использования подборку объявлений.'], ['Открытые источники', 'Согласуем открытые источники объявлений и правила их использования.']],
     artifact: ['Веб-прототип каталога стажировок', 'Интерактивный макет поиска и просмотра объявления', 'Рабочий экран ведения карьерных объявлений'],
     scope: [['Поиск и фильтры', 'Включить поиск и фильтры по согласованным полям; автоматическую отправку отклика не включать.'], ['Страница объявления', 'Включить список и полную страницу объявления; регистрацию отложить.'], ['Ведение каталога', 'Включить добавление и обновление объявлений; автоматический сбор из внешних сервисов не включать.']],
-    metrics: ['Соответствие результатов поиска контрольным объявлениям', 'Время поиска подходящего предложения', 'Понятность условий стажировки на странице объявления'],
+    metrics: ['Соответствие результатов поиска контрольным объявлениям', 'Время поиска подходящего предложения', 'Доля студентов, правильно определивших условия стажировки по объявлению'],
     targets: ['Поиск и фильтры возвращают ожидаемые объявления в согласованных сценариях.', 'Студент находит предложение с нужными условиями без подсказки.', 'Страница объявления показывает согласованные сведения без выдуманных условий.'],
   },
   general: {
@@ -93,6 +93,7 @@ const enums = {
   'constraints.deadlineMode': [['Гибкий срок', 'flexible'], ['К определённой дате', 'fixed']],
 };
 const manualOnly = new Set(['contact.channel', 'constraints.deadlineDate']);
+const answerFields = new Set(['title', 'context', 'need', 'users', 'data.source', 'result.artifact', 'result.scope', 'success.metric', 'success.target', 'constraints.technologyAccess', 'contact.consultation', 'contact.feedback']);
 const clean = (text) => typeof text === 'string' ? text.trim().replace(/\s+/gu, ' ') : '';
 const shortLabel = (text) => text.length <= 80 ? text : `${text.slice(0, 77).replace(/\s+\S*$/u, '')}…`;
 const options = (items) => items.map((item) => Array.isArray(item) ? { label: shortLabel(item[0]), value: item[1] } : { label: shortLabel(item), value: item });
@@ -113,15 +114,82 @@ function profileFor(context) {
   return selected;
 }
 
+const refinementAnswers = {
+  'data.source': [
+    ['Проверка формата', 'Проверим формат материалов и наличие полей, необходимых для согласованного сценария.'],
+    ['Проверка полноты', 'Проверим пропуски и противоречия в материалах до использования в прототипе.'],
+    ['Проверка доступа', 'Подтвердим способ передачи материалов и разрешение использовать их в прототипе.'],
+  ],
+  'result.scope': [
+    ['Пустой результат', 'Уточним ожидаемое поведение, когда для запроса нет подходящего результата.'],
+    ['Ошибочный ввод', 'Уточним обработку некорректного ввода в согласованном сценарии.'],
+    ['Сбой источника', 'Уточним поведение, если необходимые для сценария данные временно недоступны.'],
+  ],
+  'constraints.technologyAccess': [
+    ['Проверка доступов', 'До запуска проверим необходимые разрешения в пределах уже согласованных ограничений.'],
+    ['Проверка интеграций', 'Сверим планируемые подключения с перечисленными ограничениями заказчика.'],
+    ['Проверка данных', 'Проверим, что используемые материалы соответствуют указанным ограничениям.'],
+  ],
+  'contact.feedback': [
+    ['Единый список замечаний', 'Зафиксируем замечания и результат их проверки в общем списке.'],
+    ['Совместная демонстрация', 'На демонстрации сверим результат с согласованными условиями и запишем замечания.'],
+    ['Письменное подтверждение', 'После проверки зафиксируем итоговое решение и оставшиеся замечания письменно.'],
+  ],
+};
+
+function contactAnswers(question, context) {
+  const text = question.text || '';
+  if (/(?:^|[^\p{L}])(?:кто|кем|кого)(?=$|[^\p{L}])/iu.test(text)) {
+    const role = /преподавател|педагог/iu.test(`${text} ${contextText(context)}`) ? 'Преподаватель' : 'Специалист по задаче';
+    const action = question.field === 'contact.feedback' ? 'проверит прототип и передаст замечания' : 'сможет отвечать на вопросы команды';
+    return [[role, `${role} ${action}.`], ['Представитель заказчика', `Представитель заказчика ${action}.`], ['Пока неизвестно', 'Не знаю.']];
+  }
+  if (/как часто|периодич|частот|график|когда/iu.test(text)) return [
+    ['В рабочие дни', 'Ответственный сможет отвечать на вопросы команды в рабочие дни.'],
+    ['По согласованному графику', 'Будем проводить консультации по согласованному с командой графику.'],
+    ['Перед проверкой этапа', 'Будем консультировать команду перед проверкой промежуточного результата.'],
+  ];
+  if (/сможет|смогут|будет ли|возможно ли|планиру.*ли/iu.test(text)) return question.field === 'contact.feedback' ? [
+    ['Проверка по этапам', 'Ответственный сможет проверять промежуточные результаты и передавать замечания.'],
+    ['Итоговая проверка', 'Ответственный сможет проверить готовый прототип и дать обратную связь.'],
+    ['Не планируется', 'Обратная связь по прототипу пока не планируется.'],
+  ] : [
+    ['Регулярно', 'Ответственный сможет консультировать команду в ходе работы.'],
+    ['По запросу', 'Ответственный сможет отвечать на отдельные вопросы команды по запросу.'],
+    ['Не планируется', 'Консультации в ходе работы не планируются.'],
+  ];
+  return null;
+}
+
+function metricAnswers(profile, context) {
+  const text = contextText(context);
+  if (/ритм|MIDI|аудиозапис/iu.test(text)) return [
+    'Совпадение отмеченных ошибок ритма с разметкой преподавателя',
+    'Время разбора упражнения с прототипом и без него',
+    'Доля ошибок ритма из контрольной разметки, найденных прототипом',
+  ];
+  if (profile === profiles.library && /поиск|доступност|уч[её]т.*книг/iu.test(text)) return [
+    'Время поиска нужной книги и проверки её доступности',
+    'Совпадение доступности книг с контрольным журналом',
+    'Доля пользователей, нашедших нужную книгу без подсказки',
+  ];
+  return profile.metrics;
+}
+
 export function getQuestionOptions(question, taskContext = {}) {
   const field = question?.field;
   if (manualOnly.has(field)) return [];
   if (Object.hasOwn(enums, field)) return options(enums[field]);
+  if (question?.refines) return question.origin !== 'live' && Object.hasOwn(refinementAnswers, field) ? options(refinementAnswers[field]) : [];
+  if (field === 'contact.consultation' || field === 'contact.feedback') {
+    const answers = contactAnswers(question, taskContext);
+    if (answers) return options(answers);
+  }
   const profile = profileFor(taskContext);
   const answers = {
     title: profile.titles, context: profile.context, need: profile.need, users: profile.users,
     'data.source': profile.sources, 'result.artifact': profile.artifact, 'result.scope': profile.scope,
-    'success.metric': profile.metrics, 'success.target': profile.targets,
+    'success.metric': metricAnswers(profile, taskContext), 'success.target': profile.targets,
     'constraints.technologyAccess': [
       ['Технологии на выбор команды', 'Команда выбирает технологии; используем тестовые данные и не подключаемся к внутренним системам.'],
       ['Только открытые данные', 'Используем разрешённые открытые данные; персональные данные и закрытые сервисы не подключаем.'],
@@ -144,18 +212,30 @@ export function getQuestionOptions(question, taskContext = {}) {
 // Exact quantities, dates, money and contact details are inappropriate invented
 // defaults. They should be entered deliberately in the free answer instead.
 const specificFacts = /\d|@|https?:\/\/|www\.|[$€₽₸]|(?:^|[^\p{L}])(?:рубл[\p{L}]*|тенге|доллар[\p{L}]*|евро|два|две|три|четыре|пять|шесть|семь|восемь|девять|десять|двадцать|тридцать|сто|тысяч[\p{L}]*|миллион[\p{L}]*)(?=$|[^\p{L}])/iu;
+const unknownContact = /^(?:(?:консультант|ответственный|проверяющий|порядок обратной связи|график консультаций|формат общения)\s+)?(?:пока\s+)?(?:не определ[её]н[аоы]?|неизвест[её]н|неизвестн[аоы])\.?$/iu;
+const measuredMetric = /время|дол[яюи]|количеств|число|частот|точност|совпад|соответств|сравн|корректност|ошиб|без подсказ|без посторон|контрольн|критери/iu;
+const vagueMetric = /демонстрац|отзыв|обратн[\p{L}]* связ|удобств|практическ[\p{L}]* польз|пригодн|работоспособност|возможность|результат[\p{L}]* (?:проверки|тестирован)/iu;
+function inventedContact(value, context) {
+  const names = value.match(/[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+/gu) || [];
+  if (names.some((name) => !contextText(context).includes(name))) return true;
+  const actors = [...value.matchAll(/(?:^|[.!?]\s+)([А-ЯЁ][а-яё]+)\s+(?:ответит|проверит|сможет|будет|провед[её]т)/gu)].map((match) => match[1]);
+  const roles = /^(?:Преподаватель|Педагог|Методист|Библиотекарь|Наставник|Заказчик|Координатор|Представитель|Ответственный|Специалист|Сотрудник|Руководитель|Администратор|Заведующий|Эксперт|Проверяющий|Команда)$/u;
+  return actors.some((actor) => !roles.test(actor) && !contextText(context).includes(actor)) || /завтра|послезавтра/iu.test(value);
+}
 
 export function normalizeQuestionOptions(question, taskContext = {}, candidateOptions = question?.options) {
   const fallback = getQuestionOptions(question, taskContext);
-  if (!fallback.length || Object.hasOwn(enums, question.field)) return fallback;
-  // Contact suggestions deliberately use roles and interaction formats rather
-  // than model-generated identities or promises of exact response times.
-  if (question.field.startsWith('contact.')) return fallback;
+  if (Object.hasOwn(enums, question.field) || (!fallback.length && !(question.refines && answerFields.has(question.field)))) return fallback;
+  const contact = question.field.startsWith('contact.');
   const normalized = [], values = new Set(), labels = new Set();
   const append = (candidate) => {
     if (!candidate || typeof candidate !== 'object') return;
-    const label = clean(candidate.label), value = clean(candidate.value);
-    if (!hasMeaningfulValue(label) || !hasMeaningfulValue(value) || label.length > 80 || value.length > 300 || specificFacts.test(`${label} ${value}`)) return;
+    const label = clean(candidate.label), originalValue = clean(candidate.value);
+    const unknown = contact && originalValue && (!hasMeaningfulValue(originalValue) || unknownContact.test(originalValue));
+    const value = unknown ? 'Не знаю.' : originalValue;
+    if ((!unknown && (!hasMeaningfulValue(label) || !hasMeaningfulValue(value))) || !label || label.length > 80 || originalValue.length > 300 || specificFacts.test(`${label} ${originalValue}`)) return;
+    if (contact && inventedContact(`${label}. ${originalValue}`, taskContext)) return;
+    if (question.field === 'success.metric' && vagueMetric.test(value) && !measuredMetric.test(value)) return;
     const key = (text) => text.normalize('NFKC').toLowerCase().replaceAll('ё', 'е').replace(/[\s.!?…]+$/gu, '');
     const valueKey = key(value), labelKey = key(label);
     if (values.has(valueKey) || labels.has(labelKey)) return;

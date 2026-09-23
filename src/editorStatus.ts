@@ -1,5 +1,5 @@
 import type { AiResult, OwnerTask, Question } from './types.ts'
-import { fields, getField, type EditorForm } from './editorModel.ts'
+import { fields, getField, refinementBase, type EditorForm } from './editorModel.ts'
 import { hasMeaningfulValue, normalizeKnownValue } from '../shared/card-values.js'
 
 export function aiModeLabel(result: AiResult | null): string {
@@ -30,6 +30,12 @@ export function answerFeedback(question: Question, form: EditorForm): string | n
   const response = form.answers.find(answer => answer.questionId === question.id)
   if (!response || (!response.value && !response.skipped)) return null
   if (form.manualFields.includes(question.field)) return 'Ответ учтён. В карточке оставлена ваша ручная правка.'
+  const base = refinementBase(question)
+  if (base) {
+    if (response.skipped || !hasMeaningfulValue(response.value) || normalizeKnownValue(response.value) === base) return 'Исходные сведения сохранены. Дополнительную деталь можно уточнить позже.'
+    if ((normalizeKnownValue(response.value)?.length || 0) > (question.field === 'title' ? 120 : 1000)) return 'Ответ сохранён целиком, но превышает размер поля. Карточка не изменена: сократите формулировку в ней вручную.'
+    if (normalizeKnownValue(getField(form.card, question.field)) === normalizeKnownValue(response.value)) return 'Уточнение добавлено к исходным сведениям.'
+  }
   if (response.skipped || !hasMeaningfulValue(response.value)) return 'Сведения пока неизвестны и не добавляют баллов за это поле.'
   return normalizeKnownValue(getField(form.card, question.field)) === normalizeKnownValue(response.value)
     ? 'Ответ перенесён в карточку.'
