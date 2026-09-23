@@ -8,3 +8,4 @@ dist/
 *.db
 *.db-*
 .vite/
+server/data/evals/
