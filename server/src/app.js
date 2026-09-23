@@ -100,20 +100,33 @@ app.get('/api/tasks', wrap((req, res) => {
     const actor = requireActor(req, 'business');
     const where = 'WHERE t.business_id=?';
     const total = db.prepare(`SELECT COUNT(*) AS total FROM tasks t ${where}`).get(actor.id).total;
-    const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM applications a WHERE a.task_id=t.id) AS application_count FROM tasks t ${where} ORDER BY t.updated_at DESC,t.id ASC LIMIT ? OFFSET ?`).all(actor.id, query.limit, query.offset);
+    const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM applications a WHERE a.task_id=t.id) AS application_count, (SELECT COUNT(*) FROM applications a WHERE a.task_id=t.id AND a.status='pending') AS pending_application_count FROM tasks t ${where} ORDER BY t.updated_at DESC,t.id ASC LIMIT ? OFFSET ?`).all(actor.id, query.limit, query.offset);
     return res.json({ items: rows.map((row) => taskSummaryFromRow(row, 'mine')), total });
   }
   const clauses = ["t.publication_status='published'"];
   const params = [];
-  if (query.topic) { clauses.push('t.confirmed_topic=?'); params.push(query.topic); }
+  if (query.topic) { clauses.push('t.published_topic=?'); params.push(query.topic); }
   if (query.level) {
     const bounds = { needs_clarification: [0, 39], workable: [40, 69], ready: [70, 89], priority: [90, 100] }[query.level];
-    clauses.push('t.score BETWEEN ? AND ?'); params.push(...bounds);
+    clauses.push('t.published_score BETWEEN ? AND ?'); params.push(...bounds);
   }
   const where = `WHERE ${clauses.join(' AND ')}`;
   const total = db.prepare(`SELECT COUNT(*) AS total FROM tasks t ${where}`).get(...params).total;
-  const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM applications a WHERE a.task_id=t.id) AS application_count FROM tasks t ${where} ORDER BY t.score DESC,t.published_at DESC,t.id ASC LIMIT ? OFFSET ?`).all(...params, query.limit, query.offset);
+  const rows = db.prepare(`SELECT t.*, (SELECT COUNT(*) FROM applications a WHERE a.task_id=t.id) AS application_count FROM tasks t ${where} ORDER BY t.published_score DESC,t.published_at DESC,t.id ASC LIMIT ? OFFSET ?`).all(...params, query.limit, query.offset);
   return res.json({ items: rows.map((row) => taskSummaryFromRow(row, 'catalog')), total });
+}));
+
+app.get('/api/tasks/applications', wrap((req, res) => {
+  const actor = requireActor(req);
+  const pagination = parse(z.object({ limit: finiteInt.default(100), offset: finiteInt.default(0) }).strict(), req.query);
+  if (pagination.limit < 1 || pagination.limit > 100) fail(422, 'VALIDATION_ERROR', 'limit должен быть от 1 до 100');
+  const scope = actor.kind === 'business' ? 't.business_id=?' : "a.team_id=? AND t.publication_status='published'";
+  const cardColumn = actor.kind === 'business' ? 't.working_card_json' : 't.published_card_json';
+  const total = db.prepare(`SELECT COUNT(*) AS total FROM applications a JOIN tasks t ON t.id=a.task_id WHERE ${scope}`).get(actor.id).total;
+  const rows = db.prepare(`SELECT a.*,team.name AS team_name,${cardColumn} AS task_card_json
+    FROM applications a JOIN tasks t ON t.id=a.task_id JOIN actors team ON team.id=a.team_id
+    WHERE ${scope} ORDER BY a.created_at DESC,a.id ASC LIMIT ? OFFSET ?`).all(actor.id, pagination.limit, pagination.offset);
+  res.json({ items: rows.map((row) => ({ ...applicationFromRow(row), taskTitle: decode(row.task_card_json)?.title ?? 'Задача без названия' })), total });
 }));
 
 app.get('/api/tasks/:id', wrap((req, res) => {
@@ -131,21 +144,25 @@ app.patch('/api/tasks/:id', wrap((req, res) => {
     draftText: z.string().trim().min(1).max(6000).optional(),
     topic: z.enum(TOPICS).optional(),
     cardPatch: z.record(z.string(), z.unknown()).optional(),
+    manualFields: z.array(z.enum(CARD_PATHS)).max(CARD_PATHS.length).optional(),
     answers: z.array(z.object({ questionId: z.string(), value: z.string().max(2000).nullable(), skipped: z.boolean() }).strict()).max(20).optional(),
   }).strict(), jsonFields(req));
-  if (body.draftText === undefined && body.topic === undefined && body.cardPatch === undefined && body.answers === undefined) fail(422, 'VALIDATION_ERROR', 'Укажите изменения');
+  if (body.draftText === undefined && body.topic === undefined && body.cardPatch === undefined && body.answers === undefined && body.manualFields === undefined) fail(422, 'VALIDATION_ERROR', 'Укажите изменения');
   const row = ownerTask(req, req.params.id);
   checkRevision(row, body.revision);
   const card = body.cardPatch ? mergeCard(decode(row.working_card_json), body.cardPatch) : decode(row.working_card_json);
-  const answers = body.answers === undefined ? decode(row.answers_json) : body.answers.map((answer) => {
+  const incomingAnswers = body.answers?.map((answer) => {
     if (answer.skipped && answer.value) fail(422, 'VALIDATION_ERROR', 'Пропущенный вопрос не должен содержать ответ');
     if (!decode(row.questions_json).some((q) => q.id === answer.questionId)) fail(422, 'VALIDATION_ERROR', 'Неизвестный вопрос');
     return { questionId: answer.questionId, value: answer.skipped ? null : cleanText(answer.value, 2000), skipped: answer.skipped };
   });
-  if (new Set(answers.map((answer) => answer.questionId)).size !== answers.length) fail(422, 'VALIDATION_ERROR', 'Повторяющийся вопрос');
+  if (incomingAnswers && new Set(incomingAnswers.map((answer) => answer.questionId)).size !== incomingAnswers.length) fail(422, 'VALIDATION_ERROR', 'Повторяющийся вопрос');
+  const answersById = new Map(decode(row.answers_json).map((answer) => [answer.questionId, answer]));
+  for (const answer of incomingAnswers ?? []) answersById.set(answer.questionId, answer);
+  const answers = [...answersById.values()];
   const timestamp = now();
-  db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,revision=revision+1,updated_at=? WHERE id=?`)
-    .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), timestamp, row.id);
+  db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,manual_fields_json=?,revision=revision+1,updated_at=? WHERE id=?`)
+    .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), encode(body.manualFields === undefined ? decode(row.manual_fields_json) : [...new Set(body.manualFields)]), timestamp, row.id);
   const next = getTask(row.id);
   res.json({ task: taskFromRow(next), previewRating: scoreCard(card) });
 }));
@@ -169,9 +186,10 @@ app.post('/api/tasks/:id/publish', wrap((req, res) => {
   checkRevision(row, revision);
   if (row.confirmed_revision !== row.revision || !row.confirmed_card_json) fail(409, 'NOT_CONFIRMED', 'Подтвердите текущую версию карточки');
   validatePublishable(decode(row.confirmed_card_json));
-  if (row.publication_status !== 'published') {
+  if (row.published_revision !== row.revision) {
     const timestamp = now();
-    db.prepare("UPDATE tasks SET publication_status='published',published_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, row.id);
+    db.prepare("UPDATE tasks SET publication_status='published',published_card_json=?,published_topic=?,published_revision=?,published_rating_json=?,published_score=?,published_at=?,updated_at=? WHERE id=?")
+      .run(row.confirmed_card_json, row.confirmed_topic, row.confirmed_revision, encode(taskFromRow(row).rating), row.score, timestamp, timestamp, row.id);
   }
   res.json({ task: taskFromRow(getTask(row.id)) });
 }));
@@ -194,8 +212,12 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   const task = taskFromRow(row);
   const hash = createHash('sha256').update(encode({ promptVersion: AI_PROMPT_VERSION, model: process.env.OPENAI_MODEL || 'gpt-6-sol', mode: body.mode, revision: task.revision, draftText: task.draftText, topic: task.topic, card: task.workingCard, answers: task.answers, ...(body.mode === 'compose' ? { questions: task.questions } : {}) })).digest('hex');
   const cache = decode(row.analysis_cache_json);
-  if (cache[body.mode]?.hash === hash) return res.json({ ...cache[body.mode].result, sourceRevision: row.revision, mode: 'cached' });
-  limitAi(actor.id);
+  if (cache[body.mode]?.hash === hash) {
+    const result = { ...cache[body.mode].result, sourceRevision: row.revision, mode: cache[body.mode].result.mode === 'template' ? 'template' : 'cached' };
+    db.prepare('UPDATE tasks SET ai_result_json=? WHERE id=?').run(encode(result), row.id);
+    return res.json(result);
+  }
+  if (process.env.AI_MODE !== 'template' && process.env.OPENAI_API_KEY) limitAi(actor.id);
   let mode = 'template';
   let result;
   if (process.env.AI_MODE !== 'template' && process.env.OPENAI_API_KEY) {
@@ -227,14 +249,19 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
   if (!result) result = templateResult(task, body.mode);
   const latest = getTask(row.id);
   if (latest.revision !== row.revision) fail(409, 'REVISION_CONFLICT', 'Задача изменилась во время AI-запроса');
-  const questions = body.mode === 'analyze' ? result.questions.map((q) => ({ ...q, id: randomUUID(), sourceRevision: row.revision })) : [];
-  const payload = { questions, proposal: result.proposal, warnings: result.warnings };
-  if (body.mode === 'analyze') db.prepare('UPDATE tasks SET questions_json=? WHERE id=?').run(encode(questions), row.id);
-  if (mode === 'live') {
-    cache[body.mode] = { hash, result: payload };
-    db.prepare('UPDATE tasks SET analysis_cache_json=? WHERE id=?').run(encode(cache), row.id);
+  const questions = body.mode === 'analyze' ? result.questions.map((q) => ({ ...q, id: task.questions.find((previous) => previous.field === q.field)?.id ?? `q:${q.field}`, sourceRevision: row.revision })) : task.questions;
+  // Keep source questions for saved answers even when a later analysis asks about new gaps.
+  const allQuestions = [...task.questions];
+  for (const question of questions) {
+    const index = allQuestions.findIndex((previous) => previous.id === question.id);
+    if (index < 0) allQuestions.push(question);
+    else allQuestions[index] = question;
   }
-  res.json({ ...payload, sourceRevision: row.revision, mode });
+  const payload = { questions, proposal: result.proposal, warnings: result.warnings, evidence: result.evidence, sourceRevision: row.revision, mode };
+  cache[body.mode] = { hash, result: payload };
+  db.prepare('UPDATE tasks SET questions_json=?,analysis_cache_json=?,ai_result_json=? WHERE id=?')
+    .run(encode(allQuestions), encode(cache), encode(payload), row.id);
+  res.json(payload);
 }));
 
 const applicationBody = z.object({

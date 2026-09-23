@@ -1,6 +1,6 @@
 # Контракт frontend ↔ backend для MVP AI Sana
 
-Версия: 1. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
+Версия: 2. Контракт редактора с автосохранением, источниками предложений и отдельной опубликованной версией. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
 
 ## Общие правила
 
@@ -136,7 +136,7 @@
 }
 ```
 
-`breakdown` всегда содержит все семь категорий в этом порядке, `score` равен сумме `earned`. UI показывает `score`, `level`, категории и максимум три ближайшие подсказки из `missing`; сам баллы не считает. `previewRating` после редактирования — возможный балл **после** подтверждения; `task.rating` остаётся последним подтверждённым баллом.
+`breakdown` всегда содержит все семь категорий в этом порядке, `score` равен сумме `earned`. UI показывает `score`, `level`, категории и максимум три ближайшие подсказки из `missing`; сам баллы не считает. `task.previewRating` есть в каждом ответе владельцу, включая загрузку: это полнота текущего рабочего черновика. `task.rating` остаётся последним подтверждённым баллом. PATCH также возвращает `previewRating` на верхнем уровне для совместимости.
 
 `OwnerTask` в `{task}` для бизнеса (типы `Card`, `Rating`, `Question`, `Answer` описаны выше и ниже):
 
@@ -147,25 +147,50 @@ type OwnerTask = {
   topic: "education" | "career" | "operations" | "analytics" | "other";
   workingCard: Card;
   confirmedCard: Card | null;
+  publishedCard: Card | null;
   questions: Question[];
   answers: Answer[];
   revision: number;
   confirmedRevision: number | null;
+  publishedRevision: number | null;
+  hasUnpublishedChanges: boolean;
+  manualFields: string[];
+  aiResult: AiResult | null;
   publicationStatus: "draft" | "published";
   rating: Rating;
+  previewRating: Rating;
   publishedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
 ```
 
-После подтверждения `confirmedCard` содержит полный Card и `confirmedRevision === revision`. При изменении опубликованной задачи `workingCard` может быть новее `confirmedCard`; в каталоге остаётся предыдущая подтверждённая версия до следующего подтверждения.
+После подтверждения `confirmedCard` содержит полный Card и `confirmedRevision === revision`. Только явный `publish` копирует эту версию в `publishedCard` вместе с темой и рейтингом. Правка и даже повторное подтверждение не меняют каталог. `hasUnpublishedChanges` равен true у опубликованной задачи, если рабочая revision отличается от publishedRevision. Повторный publish текущей опубликованной версии безопасен и не меняет дату публикации.
 
-`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions` или `draftText`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде. Строка списка `TaskSummary`: `{id,title,topic,rating,publicationStatus,publishedAt,applicationCount}`. В каталоге title/topic/rating берутся из подтверждённой версии. В списке бизнеса для неподтверждённого черновика title — рабочий `title` или первые 60 символов `draftText`, topic — рабочая тема, rating=0 до первого подтверждения.
+`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — отдельный **опубликованный снимок**; нет `workingCard`, `answers`, `questions` или `draftText`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде.
+
+Строка списка `TaskSummary`: `{id,title,topic,rating,previewRating,publicationStatus,publishedAt,applicationCount,pendingApplicationCount,need,result,dataAvailability,deadline,hasUnpublishedChanges,updatedAt}`. `need` и `result` — строка или null; result содержит `result.artifact`. `dataAvailability` — `available|planned|unavailable|null`. `deadline` — дата YYYY-MM-DD, «Гибкий срок» или null. В каталоге все сведения, рейтинг и сортировка берутся из опубликованного снимка, `previewRating === rating`, `hasUnpublishedChanges:false`, `updatedAt === publishedAt`. В списке бизнеса title/topic/need/result/dataAvailability/deadline/previewRating берутся из рабочего черновика; `rating=0` до первого подтверждения. `pendingApplicationCount` используется в бизнес-списке для числа ожидающих решения откликов (в каталоге 0).
 
 `Question`: `{id,field,text,sourceRevision}`. `Answer`: `{questionId,value,skipped}`. При пропуске `value:null, skipped:true`; не превращать пропуск в выдуманный ответ.
 
-`Application`: `{id,taskId,teamId,teamName,idea,plan,timeline,prototypeUrl,status,createdAt,decidedAt}`. Пример timeline — «2 недели»; prototypeUrl — ссылка http/https, не файл.
+ID вопроса стабилен для поля (`q:data.availability`; прежние ID сохраняются для совместимости). `task.questions` хранит также прежние вопросы, на которые есть ответы: повторный анализ не теряет их связь. PATCH `answers` обновляет только переданные questionId; остальные ответы сохраняются. Для очистки передать `{questionId,value:null,skipped:false}`.
+
+```ts
+type AiResult = {
+  sourceRevision: number;
+  mode: 'live' | 'cached' | 'template';
+  questions: Question[];
+  proposal: Card;
+  warnings: string[];
+  evidence: Array<{ field: string; sourceId: string; quote: string }>;
+};
+```
+
+`aiResult` хранит последнее предложение, включая шаблонное, и восстанавливается после загрузки. `evidence` содержит точные цитаты для ненулевых предложенных полей: `draft` — исходное описание, `answer:<questionId>` — сохранённый ответ, `card:<path>` — существующее поле. Неизвестные сведения остаются null. Локальный шаблон консервативно извлекает сведения из текста и переносит ответы, включая перечисления и дату; это не живая генерация. Для срока ответ может содержать `flexible`, `fixed` или дату YYYY-MM-DD; для доступности данных — `available`, `planned`, `unavailable`. Ответ с проверяемым числом на вопрос `success.metric` также предлагается как `success.target`.
+
+`manualFields` — список путей Card, изменённых пользователем, включая намеренно очищенные. PATCH с этим полем заменяет весь список; без него список сохраняется. Frontend отправляет объединение прежнего списка с новыми ручными правками. Backend не перезаписывает эти поля при генерации; frontend также объединяет предложение с рабочей карточкой по полям, сохраняя защищённые правки. Для снятия защиты передать новый список без нужного пути. AI не применяет proposal к workingCard автоматически.
+
+`Application`: `{id,taskId,teamId,teamName,idea,plan,timeline,prototypeUrl,status,createdAt,decidedAt}`. Общий список дополнительно содержит `taskTitle`: рабочее название для владельца бизнеса и опубликованное название для команды. Пример timeline — «2 недели»; prototypeUrl — ссылка http/https, не файл.
 
 ## API для разработки
 
@@ -179,9 +204,10 @@ type OwnerTask = {
 | `POST /api/tasks` | `{draftText,topic}` | 201 `{task:OwnerTask}`; начать редактор |
 | `GET /api/tasks?scope=mine` | — | `{items:TaskSummary[],total}`; рабочая область бизнеса |
 | `GET /api/tasks?scope=catalog&topic=education&level=ready` | фильтры необязательны; `limit/offset` необязательны | `{items:TaskSummary[],total}`; только опубликованные, сортировка `score DESC, publishedAt DESC` |
+| `GET /api/tasks/applications` | `limit` по умолчанию 100 (1–100), `offset` по умолчанию 0 | `{items:(Application & {taskTitle:string})[],total}`; бизнес видит отклики только на свои задачи, команда — только свои отклики на опубликованные задачи |
 | `GET /api/tasks/:id` | — | `{task:OwnerTask}` владельцу либо `{task:PublicTask}` команде |
-| `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision |
-| `POST /api/tasks/:id/analyze` | `{revision,mode:"analyze"|"compose"}` | `{sourceRevision,questions:Question[],proposal:Card,warnings:string[],mode:"live"|"cached"|"template"}`; AI предлагает, сам не сохраняет Card |
+| `PATCH /api/tasks/:id` | `{revision,draftText?,topic?,cardPatch?,answers?,manualFields?}` | `{task:OwnerTask,previewRating:Rating}`; сохраняет рабочую версию, увеличивает revision |
+| `POST /api/tasks/:id/analyze` | `{revision,mode:"analyze"|"compose"}` | `AiResult`; AI предлагает, сам не сохраняет Card |
 | `POST /api/tasks/:id/confirm` | `{revision,confirmed:true}` | `{task:OwnerTask,rating:Rating}`; подтверждает текущий Card и пересчитывает баллы |
 | `POST /api/tasks/:id/publish` | `{revision}` | `{task:OwnerTask}`; требуется подтверждённая текущая версия, порога рейтинга нет |
 | `POST /api/tasks/:id/applications` | `{idea,plan,timeline,prototypeUrl,clientRequestId}` | 201 `{application:Application}`; предложение текущей команды |

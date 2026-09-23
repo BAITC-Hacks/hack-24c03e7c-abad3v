@@ -72,6 +72,8 @@ transaction(() => {
     const rating = scoreCard(card);
     const timestamp = now();
     insertTask.run(example.id, 'business-demo', example.draft, example.topic, example.topic, encode(card), encode(card), 1, 1, rating.score, encode(rating.breakdown), encode(rating.missingFields), 'v1', 'published', timestamp, timestamp, timestamp);
+    db.prepare('UPDATE tasks SET published_card_json=confirmed_card_json,published_topic=confirmed_topic,published_revision=confirmed_revision,published_rating_json=?,published_score=score WHERE id=? AND published_card_json IS NULL')
+      .run(encode(rating), example.id);
   }
   const insertProposal = db.prepare(`INSERT OR IGNORE INTO applications
     (id,task_id,team_id,idea,plan,timeline,prototype_url,status,client_request_id,created_at,decided_at)

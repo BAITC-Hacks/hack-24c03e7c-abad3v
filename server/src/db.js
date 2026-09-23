@@ -82,6 +82,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_applications_team ON applications(team_id);
 `);
 
+// Additive migration preserves existing hackathon data and its public version.
+const taskColumns = new Set(db.prepare('PRAGMA table_info(tasks)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries({
+  published_card_json: 'TEXT',
+  published_topic: 'TEXT',
+  published_revision: 'INTEGER',
+  published_rating_json: 'TEXT',
+  published_score: 'INTEGER NOT NULL DEFAULT 0',
+  ai_result_json: 'TEXT',
+  manual_fields_json: "TEXT NOT NULL DEFAULT '[]'",
+})) {
+  if (!taskColumns.has(name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
+}
+for (const row of db.prepare("SELECT * FROM tasks WHERE publication_status='published' AND published_card_json IS NULL AND confirmed_card_json IS NOT NULL").all()) {
+  const rating = scoreCard(JSON.parse(row.confirmed_card_json));
+  db.prepare('UPDATE tasks SET published_card_json=?,published_topic=?,published_revision=?,published_rating_json=?,published_score=? WHERE id=?')
+    .run(row.confirmed_card_json, row.confirmed_topic, row.confirmed_revision, JSON.stringify(rating), rating.score, row.id);
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_public_snapshot ON tasks(publication_status,published_score DESC,published_at DESC)');
+
 export const now = () => new Date().toISOString();
 export const encode = (value) => JSON.stringify(value);
 export const decode = (value) => value === null ? null : JSON.parse(value);
@@ -111,6 +131,12 @@ export function taskFromRow(row) {
     topic: row.topic,
     workingCard: decode(row.working_card_json),
     confirmedCard: decode(row.confirmed_card_json),
+    publishedCard: decode(row.published_card_json),
+    publishedRevision: row.published_revision,
+    hasUnpublishedChanges: row.publication_status === 'published' && row.published_revision !== row.revision,
+    previewRating: scoreCard(decode(row.working_card_json)),
+    aiResult: decode(row.ai_result_json),
+    manualFields: decode(row.manual_fields_json),
     questions: decode(row.questions_json),
     answers: decode(row.answers_json),
     revision: row.revision,
@@ -130,13 +156,13 @@ export function taskFromRow(row) {
 }
 
 export function publicTaskFromRow(row) {
-  if (!row?.confirmed_card_json || row.publication_status !== 'published') return null;
+  if (!row?.published_card_json || row.publication_status !== 'published') return null;
   const task = taskFromRow(row);
   return {
     id: task.id,
-    topic: row.confirmed_topic,
-    card: task.confirmedCard,
-    rating: task.rating,
+    topic: row.published_topic,
+    card: task.publishedCard,
+    rating: decode(row.published_rating_json),
     publicationStatus: 'published',
     publishedAt: task.publishedAt,
   };
@@ -145,15 +171,24 @@ export function publicTaskFromRow(row) {
 export function taskSummaryFromRow(row, scope) {
   const task = taskFromRow(row);
   const isCatalog = scope === 'catalog';
-  const card = isCatalog ? task.confirmedCard : task.workingCard;
+  const card = isCatalog ? task.publishedCard : task.workingCard;
+  const publicRating = decode(row.published_rating_json);
   return {
     id: row.id,
     title: card?.title || task.draftText.slice(0, 60),
-    topic: isCatalog ? row.confirmed_topic : row.topic,
-    rating: task.rating,
+    topic: isCatalog ? row.published_topic : row.topic,
+    rating: isCatalog ? publicRating : task.rating,
+    previewRating: isCatalog ? publicRating : task.previewRating,
+    need: card?.need ?? null,
+    result: card?.result.artifact ?? null,
+    dataAvailability: card?.data.availability ?? null,
+    deadline: card?.constraints.deadlineMode === 'flexible' ? 'Гибкий срок' : card?.constraints.deadlineDate ?? null,
+    hasUnpublishedChanges: isCatalog ? false : task.hasUnpublishedChanges,
+    updatedAt: isCatalog ? task.publishedAt : task.updatedAt,
     publicationStatus: task.publicationStatus,
     publishedAt: task.publishedAt,
     applicationCount: Number(row.application_count || 0),
+    pendingApplicationCount: Number(row.pending_application_count || 0),
   };
 }
 
