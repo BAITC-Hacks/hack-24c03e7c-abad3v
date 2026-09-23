@@ -1,6 +1,6 @@
 # Контракт frontend ↔ backend для MVP AI Sana
 
-Версия: 1. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
+Версия: 1.1. Обратно совместимое дополнение: `previewRating` доступен в `OwnerTask` и строках списка `scope=mine`; существующий `rating` сохраняет свой смысл. Этот файл можно отправить Нурдаулету и использовать как общий источник истины. Полный план — `../HACKATHON_PLAN.md`. Backend доступен в `../server/`; frontend подключается к описанному API.
 
 ## Общие правила
 
@@ -136,7 +136,12 @@
 }
 ```
 
-`breakdown` всегда содержит все семь категорий в этом порядке, `score` равен сумме `earned`. UI показывает `score`, `level`, категории и максимум три ближайшие подсказки из `missing`; сам баллы не считает. `previewRating` после редактирования — возможный балл **после** подтверждения; `task.rating` остаётся последним подтверждённым баллом.
+`breakdown` всегда содержит все семь категорий в этом порядке, `score` равен сумме `earned`. UI показывает `score`, `level`, категории и максимум три ближайшие подсказки из `missing`; сам баллы не считает.
+
+- `task.previewRating` — предварительный балл сохранённого `workingCard`, включая категории и подсказки. Backend вычисляет его при каждом ответе владельцу, в том числе при `GET /api/tasks/:id` после перезагрузки страницы. Правка может как повысить, так и понизить этот балл. Только исходный текст, ответы или ещё не применённое предложение AI не добавляют баллы в рабочую карточку.
+- `task.rating` — последний подтверждённый балл, до первого подтверждения равен 0. Изменение черновика не меняет его; каталог использует только этот рейтинг.
+- После `confirm` оба рейтинга совпадают; `confirmedRevision === revision` означает, что сохранённая рабочая версия подтверждена. Несохранённые изменения frontend учитывает отдельно.
+- `PATCH /api/tasks/:id` дополнительно сохраняет прежнее поле `previewRating` на верхнем уровне ответа для совместимости; оно равно `task.previewRating`.
 
 `OwnerTask` в `{task}` для бизнеса (типы `Card`, `Rating`, `Question`, `Answer` описаны выше и ниже):
 
@@ -153,6 +158,7 @@ type OwnerTask = {
   confirmedRevision: number | null;
   publicationStatus: "draft" | "published";
   rating: Rating;
+  previewRating: Rating;
   publishedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -161,7 +167,22 @@ type OwnerTask = {
 
 После подтверждения `confirmedCard` содержит полный Card и `confirmedRevision === revision`. При изменении опубликованной задачи `workingCard` может быть новее `confirmedCard`; в каталоге остаётся предыдущая подтверждённая версия до следующего подтверждения.
 
-`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions` или `draftText`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде. Строка списка `TaskSummary`: `{id,title,topic,rating,publicationStatus,publishedAt,applicationCount}`. В каталоге title/topic/rating берутся из подтверждённой версии. В списке бизнеса для неподтверждённого черновика title — рабочий `title` или первые 60 символов `draftText`, topic — рабочая тема, rating=0 до первого подтверждения.
+`PublicTask` для команды: `{id, topic, card, rating, publicationStatus:"published", publishedAt}`. Здесь `card` — **только подтверждённая** версия; нет `workingCard`, `answers`, `questions`, `draftText` или `previewRating`. `GET /api/tasks/:id` возвращает `{task:OwnerTask}` владельцу и `{task:PublicTask}` команде.
+
+Строка списка `TaskSummary`: `{id,title,topic,rating,publicationStatus,publishedAt,applicationCount,previewRating?}`. В каталоге title/topic/rating берутся из подтверждённой версии, `previewRating` отсутствует даже при запросе владельца. В списке бизнеса (`scope=mine`) title — рабочий `title` или первые 60 символов `draftText`, topic — рабочая тема, `rating` — подтверждённый балл (0 до первого подтверждения), `previewRating` — балл сохранённого черновика. Поэтому общий frontend-тип `TaskSummary` использует `previewRating?: Rating`, а `OwnerTask` — обязательное `previewRating: Rating`.
+
+### Подключение предварительного рейтинга на frontend
+
+При создании, открытии, сохранении, подтверждении и публикации задачи владельцу возвращается `OwnerTask` с обоими рейтингами. Для редактора используйте `task.previewRating`, для каталога — `task.rating`. В рабочем списке бизнеса можно показывать `item.previewRating` с подписью «Полнота черновика».
+
+```ts
+// Одинаково после GET и PATCH; не подменять предварительный балл на task.rating.
+setPreviewRating(response.task.previewRating);
+// Подпись «Подтверждённый балл» допустима только для актуальной сохранённой версии.
+const confirmed = response.task.confirmedRevision === response.task.revision && !dirty;
+```
+
+Например: после сохранения полной карточки `previewRating.score=100`, а `rating.score=0`. Повторный GET сохраняет это различие. После подтверждения оба равны 100. Если очистить поле в опубликованной задаче, предварительный балл снизится, а публичный рейтинг сохранится до следующего подтверждения. Изменений схемы SQLite или повторного seed не требуется.
 
 `Question`: `{id,field,text,sourceRevision}`. `Answer`: `{questionId,value,skipped}`. При пропуске `value:null, skipped:true`; не превращать пропуск в выдуманный ответ.
 

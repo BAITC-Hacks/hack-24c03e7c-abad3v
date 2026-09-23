@@ -105,11 +105,13 @@ export function actorFromRow(row) {
 
 export function taskFromRow(row) {
   if (!row) return null;
+  const workingCard = decode(row.working_card_json);
   return {
     id: row.id,
     draftText: row.draft_text,
     topic: row.topic,
-    workingCard: decode(row.working_card_json),
+    workingCard,
+    previewRating: scoreCard(workingCard),
     confirmedCard: decode(row.confirmed_card_json),
     questions: decode(row.questions_json),
     answers: decode(row.answers_json),
@@ -151,6 +153,7 @@ export function taskSummaryFromRow(row, scope) {
     title: card?.title || task.draftText.slice(0, 60),
     topic: isCatalog ? row.confirmed_topic : row.topic,
     rating: task.rating,
+    ...(!isCatalog ? { previewRating: task.previewRating } : {}),
     publicationStatus: task.publicationStatus,
     publishedAt: task.publishedAt,
     applicationCount: Number(row.application_count || 0),

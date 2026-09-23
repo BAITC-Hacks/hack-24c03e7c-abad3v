@@ -146,8 +146,8 @@ app.patch('/api/tasks/:id', wrap((req, res) => {
   const timestamp = now();
   db.prepare(`UPDATE tasks SET draft_text=?,topic=?,working_card_json=?,answers_json=?,revision=revision+1,updated_at=? WHERE id=?`)
     .run(body.draftText ?? row.draft_text, body.topic ?? row.topic, encode(card), encode(answers), timestamp, row.id);
-  const next = getTask(row.id);
-  res.json({ task: taskFromRow(next), previewRating: scoreCard(card) });
+  const task = taskFromRow(getTask(row.id));
+  res.json({ task, previewRating: task.previewRating });
 }));
 
 app.post('/api/tasks/:id/confirm', wrap((req, res) => {

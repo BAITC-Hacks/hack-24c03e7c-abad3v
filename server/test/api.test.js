@@ -11,7 +11,7 @@ delete process.env.OPENAI_API_KEY;
 const { app } = await import('../src/app.js');
 const { db } = await import('../src/db.js');
 
-test('полный путь: низкий рейтинг, AI fallback, рост баллов, два выбранных отклика', async () => {
+test('полный путь: низкий рейтинг, AI fallback, рост баллов, два выбранных отклика', async (t) => {
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -107,6 +107,76 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(all.body.items.filter((item) => item.status === 'selected').length, 2);
     const own = await request(`/api/tasks/${id}/applications`, { cookie: teamA.cookie });
     assert.equal(own.body.total, 1);
+
+    await t.test('предварительный рейтинг сохраняется при повторном открытии и не попадает в каталог', async () => {
+      const draft = await request('/api/tasks', { method: 'POST', cookie: businessCookie, body: {
+        draftText: 'Студентам нужно находить свободные аудитории.', topic: 'education',
+      } });
+      assert.equal(draft.status, 201);
+      const path = `/api/tasks/${draft.body.task.id}`;
+      assert.equal(draft.body.task.previewRating.score, 0);
+      assert.equal(draft.body.task.rating.score, 0);
+
+      const saved = await request(path, { method: 'PATCH', cookie: businessCookie, body: {
+        revision: 1, cardPatch: {
+          title: 'Поиск свободных аудиторий', context: 'Расписание уточняют вручную.',
+          need: 'Помочь находить свободные помещения.', users: 'Студенты университета.',
+        },
+      } });
+      assert.equal(saved.status, 200);
+      assert.equal(saved.body.task.previewRating.score, 30);
+      assert.equal(saved.body.task.rating.score, 0);
+      assert.deepEqual(saved.body.previewRating, saved.body.task.previewRating);
+
+      const reopened = await request(path, { cookie: businessCookie });
+      assert.equal(reopened.status, 200);
+      assert.deepEqual(reopened.body.task.previewRating, saved.body.task.previewRating);
+      assert.equal(reopened.body.task.rating.score, 0);
+      assert.equal(reopened.body.task.confirmedRevision, null);
+      const mine = await request('/api/tasks?scope=mine', { cookie: businessCookie });
+      const ownSummary = mine.body.items.find((item) => item.id === draft.body.task.id);
+      assert.deepEqual(ownSummary.previewRating, saved.body.task.previewRating);
+      assert.equal(ownSummary.rating.score, 0);
+      assert.equal((await request(path, { cookie: teamA.cookie })).status, 404);
+
+      const confirmDraft = await request(`${path}/confirm`, { method: 'POST', cookie: businessCookie, body: { revision: 2, confirmed: true } });
+      assert.equal(confirmDraft.status, 200);
+      assert.deepEqual(confirmDraft.body.task.previewRating, confirmDraft.body.task.rating);
+      const publishDraft = await request(`${path}/publish`, { method: 'POST', cookie: businessCookie, body: { revision: 2 } });
+      assert.equal(publishDraft.status, 200);
+      assert.equal(publishDraft.body.task.previewRating.score, 30);
+
+      const edited = await request(path, { method: 'PATCH', cookie: businessCookie, body: { revision: 2, cardPatch: { users: null } } });
+      assert.equal(edited.status, 200);
+      assert.equal(edited.body.task.previewRating.score, 20);
+      assert.equal(edited.body.task.rating.score, 30);
+      assert.equal(edited.body.task.confirmedRevision, 2);
+      assert.equal(edited.body.task.revision, 3);
+      const reopenedEdit = await request(path, { cookie: businessCookie });
+      assert.deepEqual(reopenedEdit.body.task.previewRating, edited.body.task.previewRating);
+      assert.ok(reopenedEdit.body.task.previewRating.missingFields.includes('users'));
+
+      for (const cookie of [undefined, teamA.cookie]) {
+        const publicDetail = await request(path, { cookie });
+        assert.equal(publicDetail.status, 200);
+        assert.equal(publicDetail.body.task.rating.score, 30);
+        assert.equal(publicDetail.body.task.card.users, 'Студенты университета.');
+        assert.equal(Object.hasOwn(publicDetail.body.task, 'previewRating'), false);
+      }
+      // Каталог использует подтверждённые баллы и при запросе владельца.
+      const publicList = await request('/api/tasks?scope=catalog', { cookie: businessCookie });
+      const publicSummary = publicList.body.items.find((item) => item.id === draft.body.task.id);
+      assert.equal(publicSummary.rating.score, 30);
+      assert.equal(Object.hasOwn(publicSummary, 'previewRating'), false);
+
+      const reconfirmed = await request(`${path}/confirm`, { method: 'POST', cookie: businessCookie, body: { revision: 3, confirmed: true } });
+      assert.equal(reconfirmed.status, 200);
+      assert.equal(reconfirmed.body.task.rating.score, 20);
+      assert.deepEqual(reconfirmed.body.task.previewRating, reconfirmed.body.task.rating);
+      const updatedPublic = await request(path);
+      assert.equal(updatedPublic.body.task.rating.score, 20);
+      assert.equal(updatedPublic.body.task.card.users, null);
+    });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     db.close();
