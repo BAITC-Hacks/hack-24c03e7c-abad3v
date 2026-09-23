@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z, ZodError } from 'zod';
-import { CARD_PATHS, TOPICS, LEVELS, CardError, cleanText, emptyCard, getField, setField, mergeCard, scoreCard, validatePublishable } from './card.js';
+import { CARD_PATHS, LEVELS, CardError, cleanText, emptyCard, getField, setField, mergeCard, scoreCard, validatePublishable } from './card.js';
 import { db, now, encode, decode, transaction, actorFromRow, taskFromRow, questionHistoryFromRow, publicTaskFromRow, taskSummaryFromRow, applicationFromRow, newTaskRow } from './db.js';
 import { AI_PROMPT_VERSION, MODEL_PRICES, liveResult, prepareLiveRequest, templateResult } from './ai.js';
 import { normalizeQuestionOptions } from '../../shared/question-options.js';
@@ -31,6 +31,8 @@ const wrap = (handler) => (req, res, next) => Promise.resolve().then(() => handl
 const parse = (schema, data) => schema.parse(data);
 const finiteInt = z.coerce.number().int().min(0).max(100000);
 const revisionBody = z.object({ revision: z.number().int().min(1) }).strict();
+const topicSchema = z.string().transform((value) => value.trim().replace(/\s+/gu, ' ')).pipe(z.string().min(1).max(80));
+const manualFieldPaths = [...CARD_PATHS, 'topic'];
 
 function actorFor(req) {
   const token = (req.headers.cookie || '').split(';').map((value) => value.trim()).find((value) => value.startsWith('ai_sana_session='))?.slice('ai_sana_session='.length);
@@ -89,13 +91,13 @@ app.post('/api/demo/session', wrap((req, res) => {
 
 app.post('/api/tasks', wrap((req, res) => {
   const actor = requireActor(req, 'business');
-  const body = parse(z.object({ draftText: z.string().trim().min(1).max(6000), topic: z.enum(TOPICS) }).strict(), jsonFields(req));
+  const body = parse(z.object({ draftText: z.string().trim().min(1).max(6000), topic: topicSchema.default('other') }).strict(), jsonFields(req));
   const row = newTaskRow({ id: randomUUID(), businessId: actor.id, draftText: body.draftText, topic: body.topic });
   res.status(201).json({ task: taskFromRow(row) });
 }));
 
 app.get('/api/tasks', wrap((req, res) => {
-  const query = parse(z.object({ scope: z.enum(['mine', 'catalog']), topic: z.enum(TOPICS).optional(), level: z.enum(LEVELS).optional(), limit: finiteInt.default(20), offset: finiteInt.default(0) }).strict(), req.query);
+  const query = parse(z.object({ scope: z.enum(['mine', 'catalog']), topic: topicSchema.optional(), level: z.enum(LEVELS).optional(), limit: finiteInt.default(20), offset: finiteInt.default(0) }).strict(), req.query);
   if (query.limit < 1 || query.limit > 100) fail(422, 'VALIDATION_ERROR', 'limit должен быть от 1 до 100');
   if (query.scope === 'mine') {
     const actor = requireActor(req, 'business');
@@ -144,9 +146,9 @@ app.patch('/api/tasks/:id', wrap((req, res) => {
     revision: z.number().int().min(1),
     sourceRevision: z.number().int().min(1).optional(),
     draftText: z.string().trim().min(1).max(6000).optional(),
-    topic: z.enum(TOPICS).optional(),
+    topic: topicSchema.optional(),
     cardPatch: z.record(z.string(), z.unknown()).optional(),
-    manualFields: z.array(z.enum(CARD_PATHS)).max(CARD_PATHS.length).optional(),
+    manualFields: z.array(z.enum(manualFieldPaths)).max(manualFieldPaths.length).optional(),
     answers: z.array(z.object({ questionId: z.string(), value: z.string().max(2000).nullable(), skipped: z.boolean() }).strict()).optional(),
   }).strict(), jsonFields(req));
   if (body.draftText === undefined && body.topic === undefined && body.cardPatch === undefined && body.answers === undefined && body.manualFields === undefined) fail(422, 'VALIDATION_ERROR', 'Укажите изменения');
@@ -172,6 +174,7 @@ app.patch('/api/tasks/:id', wrap((req, res) => {
     for (const path of CARD_PATHS) {
       if (getField(card, path) !== getField(currentCard, path)) protectedFields.add(path);
     }
+    if (body.topic !== undefined && body.topic !== row.topic) protectedFields.add('topic');
   }
   const knownQuestions = questionHistoryFromRow(row);
   const incomingAnswers = body.answers?.map((answer) => {
@@ -310,7 +313,7 @@ app.post('/api/tasks/:id/analyze', wrap(async (req, res) => {
     else history[index] = question;
     return question;
   }) : task.questions;
-  const payload = { questions, proposal: result.proposal, warnings: [...result.warnings, ...fallbackWarnings], evidence: result.evidence };
+  const payload = { questions, proposal: result.proposal, suggestedTopic: result.suggestedTopic ?? null, warnings: [...result.warnings, ...fallbackWarnings], evidence: result.evidence };
   const originMode = mode === 'cached' ? 'live' : mode;
   const inputSnapshot = { draftText: task.draftText, topic: task.topic, answers: task.answers, manualFields: task.manualFields };
   const lastAnalysis = { ...payload, operation: body.mode, sourceRevision: row.revision, generatedAt, mode: originMode, originMode, inputSnapshot };

@@ -8,7 +8,7 @@ export const fields = [
   ['data.availability', 'Доступность данных'], ['data.source', 'Материалы и источник'], ['constraints.deadlineMode', 'Срок'], ['constraints.deadlineDate', 'Дата сдачи'], ['constraints.technologyAccess', 'Технологии и доступы'],
   ['contact.channel', 'Рабочий контакт'], ['contact.consultation', 'Консультации'], ['contact.feedback', 'Обратная связь'],
 ] as const
-export const fieldLabel = (path: string) => fields.find(([key]) => key === path)?.[1] || path
+export const fieldLabel = (path: string) => path === 'topic' ? 'Тема для поиска' : fields.find(([key]) => key === path)?.[1] || path
 export function getField(card: Card, path: string): string | null { return path.split('.').reduce<unknown>((value, key) => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : null, card) as string | null }
 export function setField(card: Card, path: string, value: string | null): Card {
   const next = structuredClone(card)
@@ -27,7 +27,12 @@ export function mergeProposal(form: EditorForm, result: AiResult, baseline: Card
     if (form.manualFields.includes(path) || getField(card, path) !== getField(baseline, path) || value === getField(card, path)) continue
     card = setField(card, path, value); changed.push(path)
   }
-  return { form: { ...form, card }, changed }
+  let topic = form.topic
+  if (result.suggestedTopic !== undefined && !form.manualFields.includes('topic')) {
+    topic = result.suggestedTopic?.trim() || 'other'
+    if (topic !== form.topic) changed.push('topic')
+  }
+  return { form: { ...form, card, topic }, changed }
 }
 export function answerIntoCard(form: EditorForm, field: string, value: string | null): EditorForm {
   if (form.manualFields.includes(field)) return form
@@ -96,7 +101,8 @@ export function rebaseForm(local: EditorForm, base: EditorForm, remote: EditorFo
   }
   const answers = new Map(remote.answers.map(a => [a.questionId, a]))
   local.answers.forEach(a => { if (JSON.stringify(a) !== JSON.stringify(base.answers.find(b => b.questionId === a.questionId))) answers.set(a.questionId, a) })
-  return { card, answers: [...answers.values()], draftText: local.draftText !== base.draftText ? local.draftText : remote.draftText, topic: local.topic !== base.topic ? local.topic : remote.topic, manualFields: [...new Set([...local.manualFields, ...remote.manualFields])] }
+  const topicEdited = local.topic !== base.topic || local.manualFields.includes('topic') && !base.manualFields.includes('topic')
+  return { card, answers: [...answers.values()], draftText: local.draftText !== base.draftText ? local.draftText : remote.draftText, topic: topicEdited ? local.topic : remote.topic, manualFields: [...new Set([...local.manualFields, ...remote.manualFields])] }
 }
 export function readLocal<T>(key: string): T | null { try { return JSON.parse(localStorage.getItem(key) || 'null') as T | null } catch { return null } }
 export function writeLocal(key: string, value: unknown) { try { if (value == null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value)) } catch { /* Server saving stays available when browser storage is disabled. */ } }

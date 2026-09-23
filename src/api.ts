@@ -34,7 +34,7 @@ export const api = {
     })
   },
   getTask: (id: string) => useMock ? mockApi.getTask(id) : request<{ task: OwnerTask | PublicTask }>(`/tasks/${id}`),
-  createTask: (draftText: string, topic: Topic) => useMock ? mockApi.createTask({ draftText, topic }) : request<{ task: OwnerTask }>('/tasks', json({ draftText, topic })),
+  createTask: (draftText: string, topic?: Topic) => useMock ? mockApi.createTask({ draftText, topic }) : request<{ task: OwnerTask }>('/tasks', json({ draftText, topic })),
   patchTask: (id: string, body: { revision: number; draftText?: string; topic?: Topic; cardPatch?: Partial<Card>; answers?: Answer[]; manualFields?: string[] }) => useMock
     ? mockApi.patchTask(id, body)
     : request<{ task: OwnerTask; previewRating: Rating }>(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }),

@@ -3,6 +3,7 @@ import { latestAnswerSources, latestAnswerStates } from './sources.js';
 import { addFact, canSuggest, protectedPaths, startingProposal } from './proposal.js';
 import { isUnknownValue } from '../../shared/card-values.js';
 import { getQuestionOptions } from '../../shared/question-options.js';
+import { inferTopic } from '../../shared/topics.js';
 
 const questionText = {
   title: 'Как коротко назвать задачу, чтобы команда поняла её назначение?',
@@ -116,6 +117,7 @@ export function templateResult(task, mode) {
   const result = startingProposal(task);
   const proposal = result.proposal;
   const protectedFields = protectedPaths(task);
+  result.suggestedTopic = protectedFields.has('topic') ? null : inferTopic(task);
   const answerStates = latestAnswerStates(task);
   const unresolved = new Set(answerStates.filter((answer) => answer.skipped || unknown(answer.text)).map((answer) => answer.field));
   const warnings = [];

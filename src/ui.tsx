@@ -1,9 +1,5 @@
 import type { ReactNode } from 'react'
-import type { Level, Topic } from './types'
-export const topicOptions: Array<{ value: Topic; label: string }> = [
-  { value: 'education', label: 'Образование' }, { value: 'career', label: 'Карьера' }, { value: 'operations', label: 'Операции' },
-  { value: 'analytics', label: 'Аналитика' }, { value: 'other', label: 'Другое' },
-]
+import type { Level } from './types'
 export const levelOptions: Array<{ value: Level; label: string }> = [
   { value: 'needs_clarification', label: 'Нужно уточнить' }, { value: 'workable', label: 'Можно брать' },
   { value: 'ready', label: 'Готово к старту' }, { value: 'priority', label: 'Высокая готовность' },
