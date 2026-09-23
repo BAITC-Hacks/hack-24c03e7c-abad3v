@@ -118,8 +118,8 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(top.body.items[0].dataAvailability, 'available');
     assert.equal(top.body.items[0].deadline, 'Гибкий срок');
 
-    const teamA = await request('/api/demo/session', { method: 'POST', body: { actorId: 'team-orbit' } });
-    const teamB = await request('/api/demo/session', { method: 'POST', body: { actorId: 'team-sana' } });
+    const teamA = await request('/api/demo/session', { method: 'POST', body: { actorId: 'demo-team-02' } });
+    const teamB = await request('/api/demo/session', { method: 'POST', body: { actorId: 'demo-team-03' } });
     const bodyA = { idea: 'Тренажёр задач', plan: 'Макет и тест', timeline: '2 недели', prototypeUrl: 'https://example.org/a', clientRequestId: 'demo-request-a' };
     const appA = await request(`/api/tasks/${id}/applications`, { method: 'POST', cookie: teamA.cookie, body: bodyA });
     const retry = await request(`/api/tasks/${id}/applications`, { method: 'POST', cookie: teamA.cookie, body: bodyA });
@@ -164,7 +164,7 @@ test('полный путь: низкий рейтинг, AI fallback, рост 
     assert.equal(otherBusinessApplications.body.items[0].taskId, otherId);
     const teamApplications = await request('/api/tasks/applications', { cookie: teamA.cookie });
     assert.equal(teamApplications.body.total, 2);
-    assert.ok(teamApplications.body.items.every((item) => item.teamId === 'team-orbit'));
+    assert.ok(teamApplications.body.items.every((item) => item.teamId === 'demo-team-02'));
     assert.equal(teamApplications.body.items.find((item) => item.taskId === id).taskTitle, 'Помощник студентам', 'team must see published title');
     const page = await request('/api/tasks/applications?limit=1&offset=1', { cookie: teamA.cookie });
     assert.equal(page.body.total, 2);

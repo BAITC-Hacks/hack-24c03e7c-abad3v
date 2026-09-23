@@ -1,87 +1,92 @@
 import { db, encode, now, transaction } from './db.js';
 import { emptyCard, mergeCard, scoreCard } from './card.js';
+import { loadServerDemoData } from './demo-data.js';
+import { removeUnchangedLegacyDemo } from './legacy-demo.js';
 
-const examples = [
-  {
-    id: 'seed-task-1', topic: 'education', draft: 'Нужно приложение для студентов.',
-    fields: { title: 'Помощник для учёбы' },
-  },
-  {
-    id: 'seed-task-2', topic: 'career', draft: 'Хотим помочь выпускникам готовиться к собеседованиям.',
-    fields: {
-      title: 'Тренажёр собеседований',
-      context: 'Консультант вручную подбирает вопросы выпускникам.',
-      need: 'Упростить самостоятельную подготовку студентов.',
-      users: 'Студенты выпускного курса IT.',
-      result: { artifact: 'Веб-прототип тренажёра.' },
-    },
-  },
-  {
-    id: 'seed-task-3', topic: 'operations', draft: 'Нужен инструмент для записи на консультации.',
-    fields: {
-      title: 'Запись на консультации',
-      context: 'Заявки приходят в разные чаты, время иногда дублируется.',
-      need: 'Собрать запись в одном месте.',
-      users: 'Студенты и консультанты.',
-      data: { availability: 'available', source: 'Синтетические примеры расписаний от бизнес-заказчика.' },
-      result: { artifact: 'Веб-прототип записи.', scope: 'Выбор свободного слота и подтверждение.' },
-    },
-  },
-  {
-    id: 'seed-task-4', topic: 'analytics', draft: 'Нужна аналитика посещаемости курсов.',
-    fields: {
-      title: 'Аналитика посещаемости',
-      context: 'Отчёт по посещаемости сейчас собирается вручную.',
-      need: 'Показывать изменения посещаемости по курсам.',
-      users: 'Методисты образовательного центра.',
-      data: { availability: 'available', source: 'Синтетическая таблица отметок по занятиям.' },
-      result: { artifact: 'Панель с графиками.', scope: 'Только история посещений и фильтр по курсу.' },
-      success: { metric: 'Проверка десяти сценариев с фильтрацией.', target: 'Не менее восьми проходят.' },
-    },
-  },
-  {
-    id: 'seed-task-5', topic: 'career', draft: 'Создать тренажёр собеседований по подробному брифу.',
-    fields: {
-      title: 'Тренажёр собеседований по IT',
-      context: 'Карьерный консультант подбирает вопросы вручную.',
-      need: 'Дать выпускникам инструмент для самостоятельной тренировки.',
-      users: 'Студенты выпускного курса IT.',
-      data: { availability: 'available', source: '20 обезличенных вакансий и 40 согласованных вопросов.' },
-      result: { artifact: 'Веб-прототип тренировки.', scope: 'Пять вопросов с объяснением; без интеграции с ATS.' },
-      success: { metric: 'Проверка десяти сценариев.', target: 'Не менее восьми сценариев проходят.' },
-      constraints: { deadlineMode: 'flexible', technologyAccess: 'Синтетические данные, без доступа к внутренним системам.' },
-      contact: { channel: 'career@example.org', consultation: '20 минут раз в неделю.', feedback: 'Ответ по почте в течение двух рабочих дней.' },
-    },
-  },
-];
+const timestamp = now();
+const dataset = loadServerDemoData(timestamp);
 
-const proposals = [
-  ['seed-app-1', 'seed-task-1', 'team-vector', 'Предлагаем карту потребностей студентов.', 'Интервью, прототип, проверка.', '2 недели', 'pending'],
-  ['seed-app-2', 'seed-task-2', 'team-orbit', 'Сделаем интерактивный тренажёр.', 'Макет, реализация, проверка.', '2 недели', 'selected'],
-  ['seed-app-3', 'seed-task-2', 'team-sana', 'Добавим подбор вопросов по навыкам.', 'Данные, прототип, проверка.', '3 недели', 'selected'],
-  ['seed-app-4', 'seed-task-3', 'team-step', 'Сделаем запись по слотам.', 'Форма, календарная сетка, проверка.', '2 недели', 'rejected'],
-  ['seed-app-5', 'seed-task-4', 'team-spark', 'Соберём понятный экран аналитики.', 'Макет, графики, тесты.', '3 недели', 'pending'],
-];
-
-transaction(() => {
-  const insertTask = db.prepare(`INSERT OR IGNORE INTO tasks
-    (id,business_id,draft_text,topic,confirmed_topic,working_card_json,confirmed_card_json,revision,confirmed_revision,score,score_breakdown_json,score_missing_fields_json,scoring_version,publication_status,published_at,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  for (const example of examples) {
-    const card = mergeCard(emptyCard(), example.fields);
-    const rating = scoreCard(card);
-    const timestamp = now();
-    insertTask.run(example.id, 'business-demo', example.draft, example.topic, example.topic, encode(card), encode(card), 1, 1, rating.score, encode(rating.breakdown), encode(rating.missingFields), 'v1', 'published', timestamp, timestamp, timestamp);
-    db.prepare('UPDATE tasks SET published_card_json=confirmed_card_json,published_topic=confirmed_topic,published_revision=confirmed_revision,published_rating_json=?,published_score=score WHERE id=? AND published_card_json IS NULL')
-      .run(encode(rating), example.id);
+// Reject inconsistent files before replacing any task, application or legacy row.
+for (const task of dataset.tasks) {
+  mergeCard(emptyCard(), task.workingCard);
+  const actual = scoreCard(task.workingCard);
+  if (actual.score !== task.rating.score || actual.level !== task.rating.level) {
+    throw new Error(`CSV rating mismatch for ${task.id}: CSV ${task.rating.score}, backend ${actual.score}`);
   }
-  const insertProposal = db.prepare(`INSERT OR IGNORE INTO applications
-    (id,task_id,team_id,idea,plan,timeline,prototype_url,status,client_request_id,created_at,decided_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
-  for (const [id, taskId, teamId, idea, plan, timeline, status] of proposals) {
-    const timestamp = now();
-    insertProposal.run(id, taskId, teamId, idea, plan, timeline, `https://example.org/demo/${id}`, status, id, timestamp, status === 'pending' ? null : timestamp);
+  if (!task.id.startsWith('demo-task-') || task.businessId !== 'business-demo' || !task.isSynthetic) {
+    throw new Error(`Refusing to seed a task outside the synthetic demo namespace: ${task.id}`);
   }
+}
+for (const application of dataset.applications) {
+  if (!application.id.startsWith('demo-app-') || !application.isSynthetic) throw new Error(`Refusing to seed a non-demo application: ${application.id}`);
+}
+
+const report = transaction(() => {
+  const cleanup = removeUnchangedLegacyDemo(db);
+  const changes = { insertedTasks: 0, updatedTasks: 0, insertedApplications: 0, updatedApplications: 0, cleanup };
+  const taskColumns = [
+    'id', 'business_id', 'draft_text', 'topic', 'confirmed_topic', 'working_card_json', 'confirmed_card_json',
+    'revision', 'confirmed_revision', 'score', 'score_breakdown_json', 'score_missing_fields_json', 'scoring_version',
+    'publication_status', 'published_card_json', 'published_topic', 'published_revision', 'published_rating_json', 'published_score',
+    'questions_json', 'answers_json', 'question_history_json', 'manual_fields_json', 'protected_fields_json', 'analysis_cache_json',
+    'ai_result_json', 'last_analysis_json', 'industry', 'completeness', 'is_synthetic', 'published_at', 'created_at', 'updated_at',
+  ];
+  const upsertTask = db.prepare(`INSERT INTO tasks (${taskColumns.join(',')}) VALUES (${taskColumns.map(() => '?').join(',')})
+    ON CONFLICT(id) DO UPDATE SET ${taskColumns.filter((column) => column !== 'id').map((column) => `${column}=excluded.${column}`).join(',')}`);
+
+  for (const task of dataset.tasks) {
+    const existing = db.prepare('SELECT * FROM tasks WHERE id=?').get(task.id);
+    if (existing && existing.business_id !== 'business-demo') throw new Error(`Demo task ID belongs to another business: ${task.id}`);
+    const values = {
+      id: task.id, business_id: task.businessId, draft_text: task.draftText, topic: task.topic,
+      confirmed_topic: task.confirmedTopic, working_card_json: encode(task.workingCard), confirmed_card_json: task.confirmedCard ? encode(task.confirmedCard) : null,
+      score: task.rating.score, score_breakdown_json: encode(task.rating.breakdown), score_missing_fields_json: encode(task.rating.missingFields), scoring_version: task.rating.scoringVersion,
+      publication_status: task.publicationStatus, published_card_json: task.publishedCard ? encode(task.publishedCard) : null,
+      published_topic: task.publishedTopic, published_rating_json: task.publishedRating ? encode(task.publishedRating) : null,
+      published_score: task.publishedRating?.score ?? 0, questions_json: '[]', answers_json: '[]', question_history_json: '[]',
+      manual_fields_json: '[]', protected_fields_json: '[]', analysis_cache_json: '{}', ai_result_json: null, last_analysis_json: null,
+      industry: task.industry, completeness: task.completeness, is_synthetic: 1,
+    };
+    const revisionMatches = existing && existing.confirmed_revision === (task.confirmedCard ? existing.revision : null)
+      && existing.published_revision === (task.publishedCard ? existing.revision : null);
+    const changed = !existing || !revisionMatches || Object.entries(values).some(([key, value]) => existing[key] !== value);
+    if (!changed) continue;
+    const revision = existing ? existing.revision + 1 : task.revision;
+    Object.assign(values, {
+      revision, confirmed_revision: task.confirmedCard ? revision : null, published_revision: task.publishedCard ? revision : null,
+      published_at: task.publishedCard ? timestamp : null, created_at: existing?.created_at ?? task.createdAt, updated_at: timestamp,
+    });
+    upsertTask.run(...taskColumns.map((column) => values[column]));
+    if (existing) changes.updatedTasks += 1;
+    else changes.insertedTasks += 1;
+  }
+
+  const applicationColumns = [
+    'id', 'task_id', 'team_id', 'idea', 'plan', 'timeline', 'prototype_url', 'status', 'client_request_id',
+    'decision_source', 'link_kind', 'is_synthetic', 'created_at', 'decided_at',
+  ];
+  const upsertApplication = db.prepare(`INSERT INTO applications (${applicationColumns.join(',')}) VALUES (${applicationColumns.map(() => '?').join(',')})
+    ON CONFLICT(id) DO UPDATE SET ${applicationColumns.filter((column) => column !== 'id').map((column) => `${column}=excluded.${column}`).join(',')}`);
+  for (const application of dataset.applications) {
+    const existing = db.prepare('SELECT * FROM applications WHERE id=?').get(application.id);
+    const values = {
+      id: application.id, task_id: application.taskId, team_id: application.teamId, idea: application.idea, plan: application.plan,
+      timeline: application.timeline, prototype_url: application.prototypeUrl, status: application.status, client_request_id: application.clientRequestId,
+      decision_source: application.decisionSource, link_kind: application.linkKind, is_synthetic: 1,
+    };
+    const changed = !existing || Object.entries(values).some(([key, value]) => existing[key] !== value);
+    if (!changed) continue;
+    Object.assign(values, {
+      created_at: existing?.created_at ?? application.createdAt,
+      decided_at: application.status === 'pending' ? null : existing?.status === application.status && existing.decided_at ? existing.decided_at : timestamp,
+    });
+    upsertApplication.run(...applicationColumns.map((column) => values[column]));
+    if (existing) changes.updatedApplications += 1;
+    else changes.insertedApplications += 1;
+  }
+  return changes;
 });
 
-console.log('Demo seed ready: 5 published tasks, 5 teams, 5 proposals (idempotent).');
+console.log(`CSV demo synchronized: ${dataset.tasks.length} tasks, ${dataset.actors.filter((actor) => actor.kind === 'team').length} teams, ${dataset.applications.length} applications.`);
+console.log(JSON.stringify(report));
+if (report.cleanup.preserved.length) console.log(`Kept changed or referenced legacy records: ${report.cleanup.preserved.join(', ')}`);

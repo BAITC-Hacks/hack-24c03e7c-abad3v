@@ -3,6 +3,7 @@ import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyCard, scoreCard } from './card.js';
+import { loadServerDemoData } from './demo-data.js';
 
 const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const envPath = resolve(serverRoot, '.env');
@@ -95,6 +96,9 @@ for (const [name, definition] of Object.entries({
   manual_fields_json: "TEXT NOT NULL DEFAULT '[]'",
   question_history_json: "TEXT NOT NULL DEFAULT '[]'",
   protected_fields_json: "TEXT NOT NULL DEFAULT '[]'",
+  industry: 'TEXT',
+  completeness: 'TEXT',
+  is_synthetic: 'INTEGER NOT NULL DEFAULT 0',
 })) {
   if (!taskColumns.has(name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${definition}`);
 }
@@ -106,6 +110,11 @@ for (const row of db.prepare("SELECT * FROM tasks WHERE publication_status='publ
 db.exec('CREATE INDEX IF NOT EXISTS idx_tasks_public_snapshot ON tasks(publication_status,published_score DESC,published_at DESC)');
 db.exec('UPDATE tasks SET last_analysis_json=ai_result_json WHERE last_analysis_json IS NULL AND ai_result_json IS NOT NULL');
 db.exec('UPDATE tasks SET ai_result_json=last_analysis_json WHERE ai_result_json IS NULL AND last_analysis_json IS NOT NULL');
+
+const applicationColumns = new Set(db.prepare('PRAGMA table_info(applications)').all().map((column) => column.name));
+for (const [name, definition] of Object.entries({ decision_source: 'TEXT', link_kind: 'TEXT', is_synthetic: 'INTEGER NOT NULL DEFAULT 0' })) {
+  if (!applicationColumns.has(name)) db.exec(`ALTER TABLE applications ADD COLUMN ${name} ${definition}`);
+}
 
 export const now = () => new Date().toISOString();
 export const encode = (value) => JSON.stringify(value);
@@ -140,6 +149,9 @@ export function taskFromRow(row) {
   return {
     id: row.id,
     draftText: row.draft_text,
+    industry: row.industry,
+    completeness: row.completeness,
+    isSynthetic: Boolean(row.is_synthetic),
     topic: row.topic,
     workingCard: decode(row.working_card_json),
     confirmedCard: decode(row.confirmed_card_json),
@@ -174,6 +186,9 @@ export function publicTaskFromRow(row) {
   const task = taskFromRow(row);
   return {
     id: task.id,
+    industry: row.industry,
+    completeness: row.completeness,
+    isSynthetic: Boolean(row.is_synthetic),
     topic: row.published_topic,
     card: task.publishedCard,
     rating: decode(row.published_rating_json),
@@ -190,6 +205,9 @@ export function taskSummaryFromRow(row, scope) {
   return {
     id: row.id,
     title: card?.title || task.draftText.slice(0, 60),
+    industry: row.industry,
+    completeness: row.completeness,
+    isSynthetic: Boolean(row.is_synthetic),
     topic: isCatalog ? row.published_topic : row.topic,
     rating: isCatalog ? publicRating : task.rating,
     previewRating: isCatalog ? publicRating : task.previewRating,
@@ -218,25 +236,20 @@ export function applicationFromRow(row) {
     timeline: row.timeline,
     prototypeUrl: row.prototype_url,
     status: row.status,
+    decisionSource: row.decision_source,
+    linkKind: row.link_kind,
+    isSynthetic: Boolean(row.is_synthetic),
     createdAt: row.created_at,
     decidedAt: row.decided_at,
   };
 }
 
 export function ensureDemoActors() {
-  const count = db.prepare('SELECT COUNT(*) AS count FROM actors').get().count;
-  if (count) return;
-  const actors = [
-    ['business-demo', 'business', 'Карьерный центр', { organization: 'Карьерный центр AI Sana' }],
-    ['team-orbit', 'team', 'Orbit', { interests: ['career', 'education'], skills: ['React', 'UX'], technologies: ['JavaScript'] }],
-    ['team-sana', 'team', 'Sana Labs', { interests: ['education'], skills: ['Python', 'AI'], technologies: ['Python', 'React'] }],
-    ['team-step', 'team', 'Step', { interests: ['operations'], skills: ['Analytics'], technologies: ['JavaScript'] }],
-    ['team-spark', 'team', 'Spark', { interests: ['career'], skills: ['Design'], technologies: ['Figma', 'React'] }],
-    ['team-vector', 'team', 'Vector', { interests: ['analytics'], skills: ['Data'], technologies: ['Python'] }],
-  ];
+  const { actors } = loadServerDemoData(now());
   transaction(() => {
-    const insert = db.prepare('INSERT INTO actors (id,kind,name,profile_json,created_at) VALUES (?,?,?,?,?)');
-    for (const actor of actors) insert.run(actor[0], actor[1], actor[2], encode(actor[3]), now());
+    const insert = db.prepare(`INSERT INTO actors (id,kind,name,profile_json,created_at) VALUES (?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET kind=excluded.kind,name=excluded.name,profile_json=excluded.profile_json`);
+    for (const actor of actors) insert.run(actor.id, actor.kind, actor.name, encode(actor.profile), now());
   });
 }
 

@@ -1,30 +1,100 @@
-import { actors, applications, blankCard, labelForTopic, tasks } from './fixtures'
+import { actors, applications, blankCard, datasetVersion, labelForTopic, tasks } from './fixtures'
 import type { AiResult, Answer, Application, Card, Level, OwnerTask, PublicTask, Rating, TaskSummary, Topic } from './types'
 
 type Evidence = { field: string; sourceId: string; quote: string }
 type StoredTask = OwnerTask & {
   previewRating?: Rating; publishedRevision?: number | null; publishedCard?: Card | null
-  publishedRating?: Rating | null; publishedTopic?: Topic; confirmedTopic?: Topic
-  hasUnpublishedChanges?: boolean; aiResult?: AiResult | null; manualFields?: string[]
+  publishedRating?: Rating | null; publishedTopic?: Topic | null; confirmedTopic?: Topic | null
+  hasUnpublishedChanges?: boolean; aiResult?: AiResult | null; manualFields?: string[]; businessId?: string
 }
-const storageKey = 'ai-sana.mock.v2'
-let activeActor = actors[0]
+type StoredApplication = Application & { clientRequestId?: string }
+type StoredCache = {
+  tasks?: StoredTask[]; applications?: StoredApplication[]; actorId?: string
+  datasetVersion?: string; canonicalTaskIds?: string[]; canonicalApplicationIds?: string[]
+}
+const storageKey = 'ai-sana.mock.v3'
+const legacyStorageKey = 'ai-sana.mock.v2'
+const businessActor = actors.find((actor) => actor.kind === 'business')!
+let activeActor = businessActor
 let taskStore: StoredTask[] = structuredClone(tasks)
-let applicationStore = structuredClone(applications)
+let applicationStore: StoredApplication[] = structuredClone(applications)
+let pendingBackup: { key: string; raw: string } | null = null
+
+function knownActor(id?: string) {
+  // Only map identities that actually exist in both data sets.
+  const legacyIds: Record<string, string> = { 'business-career': businessActor.id, 'business-school': businessActor.id, 'team-qadam': 'demo-team-01', 'team-orbit': 'demo-team-02' }
+  return actors.find((actor) => actor.id === id || actor.id === (id ? legacyIds[id] : undefined))
+}
+function cachedTasks(saved: StoredCache): StoredTask[] {
+  return Array.isArray(saved.tasks) ? saved.tasks.filter((task) => task?.id && task.workingCard && Array.isArray(task.answers)) : []
+}
+function cachedApplications(saved: StoredCache): StoredApplication[] {
+  return Array.isArray(saved.applications) ? saved.applications.filter((application) => application?.id && application.taskId && application.teamId) : []
+}
+function normalizeTaskOwner(task: StoredTask): StoredTask {
+  const owner = knownActor(task.businessId)
+  return { ...task, businessId: owner?.kind === 'business' ? owner.id : businessActor.id }
+}
+function validApplications(items: StoredApplication[]): StoredApplication[] {
+  return items.flatMap((application) => {
+    const team = knownActor(application.teamId)
+    if (team?.kind !== 'team' || !taskStore.some((task) => task.id === application.taskId)) return []
+    return [{ ...application, teamId: team.id, teamName: team.name }]
+  })
+}
+function restoreCache(saved: StoredCache, legacy: boolean) {
+  let restoredTasks = cachedTasks(saved)
+  let restoredApplications = cachedApplications(saved)
+  if (legacy) {
+    // Never let the previous hardcoded seeds replace the CSV defaults. Keep changed
+    // tasks and user-created records; the complete v2 cache remains an untouched backup.
+    restoredTasks = restoredTasks.filter((task) => !tasks.some((seed) => seed.id === task.id) && (
+      !/^task-[1-9]$/.test(task.id) || task.revision > 1 || task.answers.length > 0 || task.manualFields?.length || task.aiResult ||
+      task.updatedAt !== task.createdAt || task.publicationStatus !== (/^task-[1-4]$/.test(task.id) ? 'published' : 'draft')
+    ))
+    restoredApplications = restoredApplications.filter((application) => !applications.some((seed) => seed.id === application.id) && (
+      !/^app-[1-5]$/.test(application.id) || application.status !== (application.id === 'app-2' ? 'selected' : application.id === 'app-5' ? 'rejected' : 'pending') ||
+      application.decidedAt !== null && application.decidedAt !== application.createdAt
+    ))
+  } else if (saved.datasetVersion !== datasetVersion) {
+    // Include the previous canonical IDs so rows removed from CSV cannot return
+    // from storage as if they were user-created tasks or applications.
+    const oldTaskIds = Array.isArray(saved.canonicalTaskIds) ? saved.canonicalTaskIds : restoredTasks.filter((task) => /^demo-task-/.test(task.id)).map((task) => task.id)
+    const oldApplicationIds = Array.isArray(saved.canonicalApplicationIds) ? saved.canonicalApplicationIds : restoredApplications.filter((application) => /^demo-app-/.test(application.id)).map((application) => application.id)
+    const canonicalTasks = new Set([...tasks.map((task) => task.id), ...oldTaskIds])
+    const canonicalApplications = new Set([...applications.map((application) => application.id), ...oldApplicationIds])
+    restoredTasks = restoredTasks.filter((task) => !canonicalTasks.has(task.id))
+    restoredApplications = restoredApplications.filter((application) => !canonicalApplications.has(application.id))
+  }
+  taskStore = [...new Map([...taskStore, ...restoredTasks.map(normalizeTaskOwner)].map((task) => [task.id, task])).values()]
+  applicationStore = [...new Map([...applicationStore, ...validApplications(restoredApplications)].map((application) => [application.id, application])).values()]
+  activeActor = knownActor(saved.actorId) || activeActor
+}
 
 // Mock data stays local to this browser. Private browsing and disabled storage still work.
 try {
   const raw = localStorage.getItem(storageKey)
   if (raw) {
-    const saved = JSON.parse(raw) as { tasks?: StoredTask[]; applications?: Application[]; actorId?: string }
-    if (Array.isArray(saved.tasks) && saved.tasks.every((task) => task.id && task.workingCard && Array.isArray(task.answers))) taskStore = saved.tasks
-    if (Array.isArray(saved.applications)) applicationStore = saved.applications
-    activeActor = actors.find((actor) => actor.id === saved.actorId) || activeActor
+    const saved = JSON.parse(raw) as StoredCache
+    if (saved.datasetVersion !== datasetVersion) pendingBackup = { key: `${storageKey}.backup.${saved.datasetVersion || 'unversioned'}`, raw }
+    restoreCache(saved, false)
+  }
+  else {
+    const legacy = localStorage.getItem(legacyStorageKey)
+    if (legacy) restoreCache(JSON.parse(legacy) as StoredCache, true)
   }
 } catch { /* A corrupt or unavailable local cache must not block the demo. */ }
 
 function persist() {
-  try { localStorage.setItem(storageKey, JSON.stringify({ tasks: taskStore, applications: applicationStore, actorId: activeActor.id })) }
+  try {
+    // If backing up fails (for example, storage is full), preserve the old v3
+    // snapshot instead of overwriting it without its recovery copy.
+    if (pendingBackup) { localStorage.setItem(pendingBackup.key, pendingBackup.raw); pendingBackup = null }
+    localStorage.setItem(storageKey, JSON.stringify({
+      tasks: taskStore, applications: applicationStore, actorId: activeActor.id, datasetVersion,
+      canonicalTaskIds: tasks.map((task) => task.id), canonicalApplicationIds: applications.map((application) => application.id),
+    }))
+  }
   catch { /* Continue in memory when browser storage is unavailable. */ }
 }
 
@@ -94,6 +164,7 @@ for (const task of taskStore) {
   task.manualFields ||= []
   refresh(task)
 }
+persist()
 
 function requireBusiness() {
   if (activeActor.kind !== 'business') throw { status: 403, error: { code: 'ROLE_FORBIDDEN', message: 'Это действие доступно бизнесу.' } }
@@ -248,7 +319,7 @@ export const mockApi = {
     const timestamp = new Date().toISOString()
     const card = blankCard()
     const task: StoredTask = {
-      id: `task-${nextTask++}`, draftText: input.draftText.trim(), topic: input.topic, workingCard: card, confirmedCard: null,
+      id: `task-${nextTask++}`, businessId: activeActor.id, draftText: input.draftText.trim(), topic: input.topic, workingCard: card, confirmedCard: null,
       questions: [], answers: [], revision: 1, confirmedRevision: null, publicationStatus: 'draft', rating: scoreCard(card),
       publishedCard: null, publishedRating: null, publishedRevision: null, aiResult: null, manualFields: [],
       publishedAt: null, createdAt: timestamp, updatedAt: timestamp,
